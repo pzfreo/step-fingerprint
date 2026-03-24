@@ -199,12 +199,14 @@ def create_peghead():
     ).translate(bd.Vector(0, 0, pip_bot_z))
 
     # ═══════════════════════════════════════════════════════════
-    # 7. Fuse ALL raw geometry into one solid before any fillets
+    # 7. Fuse all raw geometry before filleting
+    #    Ring + connecting shaft fused first (coplanar tilted planes),
+    #    then fused with remaining parts
     # ═══════════════════════════════════════════════════════════
 
+    ring_assembly = ring.fuse(conn_shaft)
     solid = (
-        ring
-        .fuse(conn_shaft)
+        ring_assembly
         .fuse(dome)
         .fuse(shoulder)
         .fuse(gear_shaft)
@@ -221,74 +223,66 @@ def create_peghead():
 
     # ═══════════════════════════════════════════════════════════
     # 8. Apply all fillets on the complete solid
+    #    Each fillet may wrap result in a Compound; extract the Solid
     # ═══════════════════════════════════════════════════════════
+
+    def _fillet(s, radius, edge_filter):
+        """Apply fillet and extract Solid from potential Compound wrapper."""
+        edges = [e for e in s.edges() if edge_filter(e)]
+        if not edges:
+            return s
+        result = s.fillet(radius=radius, edge_list=edges)
+        if hasattr(result, "solids"):
+            solids = result.solids()
+            if solids:
+                return solids[0]
+        return result
 
     # Outer ring edges: long arcs where tilted planes meet the sphere
     try:
-        outer_fillet_edges = [
-            e for e in solid.edges()
-            if e.length > 2 * sphere_r
+        solid = _fillet(solid, ring_outer_fillet_r, lambda e: (
+            e.length > 2 * sphere_r
             and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
             and abs(e.center().X) < 1.0
             and abs(e.center().Y) < plane_intercept + 0.2
-        ]
-        if outer_fillet_edges:
-            solid = solid.fillet(
-                radius=ring_outer_fillet_r, edge_list=outer_fillet_edges
-            )
+        ))
     except Exception:
         pass
 
     # Inner bore edges: where bore cylinder meets the tilted cut planes
     try:
-        bore_fillet_edges = [
-            e for e in solid.edges()
-            if e.length > 2 * bore_r
+        solid = _fillet(solid, ring_bore_fillet_r, lambda e: (
+            e.length > 2 * bore_r
             and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
             and math.hypot(e.center().X, e.center().Y) > bore_r - 1
-        ]
-        if bore_fillet_edges:
-            solid = solid.fillet(
-                radius=ring_bore_fillet_r, edge_list=bore_fillet_edges
-            )
+        ))
     except Exception:
         pass
 
     # Shaft-plane edges: where connecting shaft meets the tilted cut planes
     try:
-        shaft_fillet_edges = [
-            e for e in solid.edges()
-            if 1.0 < e.length < 2 * sphere_r
+        solid = _fillet(solid, shaft_plane_fillet_r, lambda e: (
+            1.0 < e.length < 2 * sphere_r
             and conn_shaft_bot_z - 1 < e.center().Z < conn_shaft_top_z
             and 0.3 < math.hypot(e.center().X, e.center().Y) < conn_flare_r + 1
-        ]
-        if shaft_fillet_edges:
-            solid = solid.fillet(
-                radius=shaft_plane_fillet_r, edge_list=shaft_fillet_edges
-            )
+        ))
     except Exception:
         pass
 
     # Pip fillets: top and bottom edges of pip cylinder
     try:
-        pip_top_edges = [
-            e for e in solid.edges()
-            if abs(e.center().Z - pip_top_z) < pip_fillet_r
+        solid = _fillet(solid, pip_fillet_r, lambda e: (
+            abs(e.center().Z - pip_top_z) < pip_fillet_r
             and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
-        ]
-        if pip_top_edges:
-            solid = solid.fillet(radius=pip_fillet_r, edge_list=pip_top_edges)
+        ))
     except Exception:
         pass
 
     try:
-        pip_bot_edges = [
-            e for e in solid.edges()
-            if abs(e.center().Z - pip_bot_z) < pip_fillet_r
+        solid = _fillet(solid, pip_fillet_r, lambda e: (
+            abs(e.center().Z - pip_bot_z) < pip_fillet_r
             and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
-        ]
-        if pip_bot_edges:
-            solid = solid.fillet(radius=pip_fillet_r, edge_list=pip_bot_edges)
+        ))
     except Exception:
         pass
 
