@@ -117,20 +117,51 @@ def create_peghead():
 
     ring_assembly = ring.fuse(conn_shaft)
 
-    # Ring edge fillets (r=0.3) on sphere-plane intersection edges
-    # These are the long circular edges where the tilted cut planes meet the sphere
+    # Ring edge fillets (r=0.3) on outer sphere-plane intersection edges (both sides),
+    # inner bore-plane edges, and shaft-plane edges
     try:
-        ring_fillet_edges = [
+        # Outer edges: long circular arcs where tilted planes meet the sphere
+        outer_fillet_edges = [
             e for e in ring_assembly.edges()
             if e.length > 30
             and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
-            and abs(e.center().X) < 1.0  # sphere-plane edges near X=0
+            and abs(e.center().X) < 1.0
             and abs(e.center().Y) < 2.0
         ]
-        if ring_fillet_edges:
-            # Fillet one edge only to keep BSpline face count within tolerance
+        if outer_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.3, edge_list=ring_fillet_edges[:1]
+                radius=0.3, edge_list=outer_fillet_edges
+            )
+    except Exception:
+        pass
+
+    # Inner bore edges: where bore cylinder meets the tilted cut planes
+    try:
+        bore_fillet_edges = [
+            e for e in ring_assembly.edges()
+            if e.length > 20
+            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
+            and math.hypot(e.center().X, e.center().Y) > 4.0
+        ]
+        if bore_fillet_edges:
+            ring_assembly = ring_assembly.fillet(
+                radius=0.3, edge_list=bore_fillet_edges
+            )
+    except Exception:
+        pass
+
+    # Shaft-plane edges: where connecting shaft meets the tilted cut planes
+    try:
+        shaft_fillet_edges = [
+            e for e in ring_assembly.edges()
+            if 1.0 < e.length < 12
+            and -7 < e.center().Z < -1.5
+            and 0.5 < math.hypot(e.center().X, e.center().Y) < 3.5
+            and abs(e.center().Y) > 0.5
+        ]
+        if shaft_fillet_edges:
+            ring_assembly = ring_assembly.fillet(
+                radius=0.3, edge_list=shaft_fillet_edges
             )
     except Exception:
         pass
