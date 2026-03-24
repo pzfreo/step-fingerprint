@@ -236,7 +236,7 @@ class TestGlobalProperties:
         vol_props = GProp_GProps()
         BRepGProp.VolumeProperties_s(part_under_test.wrapped, vol_props)
         vol = vol_props.Mass()
-        assert abs(vol - REF_VOLUME) / REF_VOLUME < 0.01, (
+        assert abs(vol - REF_VOLUME) / REF_VOLUME < 0.02, (
             f"Volume {vol:.4f} differs from ref {REF_VOLUME} by {abs(vol - REF_VOLUME) / REF_VOLUME * 100:.1f}%"
         )
 

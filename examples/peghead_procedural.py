@@ -117,8 +117,8 @@ def create_peghead():
 
     ring_assembly = ring.fuse(conn_shaft)
 
-    # Ring edge fillets (r=0.3) on outer sphere-plane intersection edges (both sides),
-    # inner bore-plane edges, and shaft-plane edges
+    # Ring edge fillets on outer sphere-plane edges, inner bore-plane edges,
+    # and shaft-plane edges for smooth ring-to-shaft transition
     try:
         # Outer edges: long circular arcs where tilted planes meet the sphere
         outer_fillet_edges = [
@@ -130,7 +130,7 @@ def create_peghead():
         ]
         if outer_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.3, edge_list=outer_fillet_edges
+                radius=0.5, edge_list=outer_fillet_edges
             )
     except Exception:
         pass
@@ -145,23 +145,23 @@ def create_peghead():
         ]
         if bore_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.3, edge_list=bore_fillet_edges
+                radius=0.4, edge_list=bore_fillet_edges
             )
     except Exception:
         pass
 
     # Shaft-plane edges: where connecting shaft meets the tilted cut planes
+    # Includes all edges along the shaft and cone where they intersect the planes
     try:
         shaft_fillet_edges = [
             e for e in ring_assembly.edges()
             if 1.0 < e.length < 12
             and -7 < e.center().Z < -1.5
-            and 0.5 < math.hypot(e.center().X, e.center().Y) < 3.5
-            and abs(e.center().Y) > 0.5
+            and 0.3 < math.hypot(e.center().X, e.center().Y) < 3.5
         ]
         if shaft_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.3, edge_list=shaft_fillet_edges
+                radius=0.5, edge_list=shaft_fillet_edges
             )
     except Exception:
         pass
