@@ -251,3 +251,21 @@ def create_peghead():
     solid = solid.fuse(boss)
 
     return solid
+
+
+if __name__ == "__main__":
+    import os
+
+    solid = create_peghead()
+
+    # Export STEP file
+    out_path = os.path.join(os.path.dirname(__file__), "peghead_procedural.step")
+    bd.export_step(solid, out_path)
+    print(f"Exported STEP to {out_path}")
+
+    # Show in OCP CAD Viewer if available (VS Code extension)
+    try:
+        from ocp_vscode import show
+        show(solid)
+    except Exception:
+        pass
