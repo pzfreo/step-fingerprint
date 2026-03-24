@@ -15,44 +15,75 @@ def create_peghead():
     """Build the guitar tuning peg head."""
 
     # ═══════════════════════════════════════════════════════════
-    # Dimensions (from reference STEP face analysis)
+    # Primary dimensions (from reference STEP face analysis)
     # ═══════════════════════════════════════════════════════════
 
+    # Ring: sphere sliced by two tilted planes, bored through Y
     sphere_r = 6.25
     sphere_cz = -11.45
-
     bore_r = 4.9
     bore_cz = -11.7
 
+    # Tilted cut planes: Y = ±intercept, tilted by slope in Z
     plane_slope = 0.0355
     plane_intercept = 1.829
 
+    # Gear shaft: cylinder from shoulder top to shaft tip
     shaft_r = 1.9
-    shaft_top_z = 10.4
+    shaft_height = 10.4
 
+    # Shoulder: wide disc between gear shaft and dome
     shoulder_r = 3.5
-    shoulder_top_z = 0.0
-    shoulder_bot_z = -1.2
+    shoulder_height = 1.2
 
-    pip_r = 1.05
-    pip_top_z = -17.826
-    pip_bot_z = -19.026
-
-    stalk_r = 0.5
-
-    # Cap torus parameters
+    # Cap torus dome: mushroom-cap below shoulder
     torus_major_r = 2.5179
     torus_minor_r = 2.0
     torus_cz = -0.2
-    dome_top_z = shoulder_bot_z  # -1.2
-    dome_bot_z = torus_cz - torus_minor_r  # -2.2
+    torus_arc_start_angle = 30   # degrees from torus equator
+    torus_arc_end_angle = 60     # degrees from torus equator
 
-    # Connecting shaft radius (smaller than gear shaft to match reference)
-    conn_r = 1.78
+    # Connecting shaft: links dome bottom into ring interior
+    conn_r = 1.78               # narrower than gear shaft
+    conn_flare_r = 2.95         # cone widens to blend into ring
+    conn_flare_z = -4.5         # Z where cylinder transitions to cone
+    conn_overlap = 0.1          # overlap into dome for clean boolean union
+    conn_ring_penetration = 1.0 # how far cone extends below sphere top
 
-    # Derived
-    sphere_top_z = sphere_cz + sphere_r   # -5.20
-    sphere_bot_z = sphere_cz - sphere_r   # -17.70
+    # Pip and stalk: small cylinder hanging below ring
+    pip_r = 1.05
+    pip_height = 1.2
+    pip_bot_z = -19.026
+    stalk_r = 0.5
+    stalk_ring_penetration = 0.5  # how far stalk extends into ring interior
+
+    # Fillets
+    ring_outer_fillet_r = 0.5   # sphere-plane intersection edges
+    ring_bore_fillet_r = 0.4    # bore-plane intersection edges
+    shaft_plane_fillet_r = 0.5  # shaft-plane transition edges
+    pip_fillet_r = 0.3          # pip top and bottom edges
+
+    # Cosmetic boss on shaft tip (matches reference d≈0.597 cylinder face)
+    boss_r = 0.2985
+    boss_h = 0.005
+
+    # ═══════════════════════════════════════════════════════════
+    # Derived positions (Z=0 is at shoulder top)
+    # ═══════════════════════════════════════════════════════════
+
+    shoulder_top_z = 0.0
+    shoulder_bot_z = shoulder_top_z - shoulder_height
+    shaft_top_z = shoulder_top_z + shaft_height
+    dome_top_z = shoulder_bot_z
+    dome_bot_z = torus_cz - torus_minor_r
+    conn_shaft_top_z = dome_bot_z + conn_overlap
+    conn_shaft_bot_z = (sphere_cz + sphere_r) - conn_ring_penetration
+    sphere_top_z = sphere_cz + sphere_r
+    sphere_bot_z = sphere_cz - sphere_r
+    pip_top_z = pip_bot_z + pip_height
+    stalk_top_z = sphere_bot_z + stalk_ring_penetration
+
+    # Plane normal normalisation factor
     n = math.sqrt(1 + plane_slope**2)
 
     # Tilted cut planes (reused for sphere and shaft clipping)
@@ -73,8 +104,9 @@ def create_peghead():
     half1 = sphere.split(plane1)
     ring_disc = half1.split(plane2)
 
+    # Bore cylinder along Y axis — oversized to cut cleanly through sphere
     bore_cyl = bd.Cylinder(
-        radius=bore_r, height=50.0,
+        radius=bore_r, height=4 * sphere_r,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.CENTER),
     )
     bore_cyl = bore_cyl.rotate(bd.Axis.X, 90).translate(bd.Vector(0, 0, bore_cz))
@@ -87,22 +119,16 @@ def create_peghead():
     #    Clipped by tilted planes for correct Y extent
     # ═══════════════════════════════════════════════════════════
 
-    # Upper connecting shaft: cylinder r=conn_r from dome to flare zone
-    conn_shaft_top_z = dome_bot_z + 0.1  # -2.1, overlap with dome
-    flare_z = -4.5  # transition to wider cone
     conn_upper = bd.Cylinder(
         radius=conn_r,
-        height=conn_shaft_top_z - flare_z,
+        height=conn_shaft_top_z - conn_flare_z,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
-    ).translate(bd.Vector(0, 0, flare_z))
+    ).translate(bd.Vector(0, 0, conn_flare_z))
 
-    # Lower connecting shaft: cone widening into ring
-    conn_shaft_bot_z = sphere_top_z - 1.0  # -6.2
-    flare_bot_r = 2.95  # widens to match ring transition
     conn_lower = bd.Cone(
-        bottom_radius=flare_bot_r,
+        bottom_radius=conn_flare_r,
         top_radius=conn_r,
-        height=flare_z - conn_shaft_bot_z,
+        height=conn_flare_z - conn_shaft_bot_z,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
     ).translate(bd.Vector(0, 0, conn_shaft_bot_z))
 
@@ -120,17 +146,17 @@ def create_peghead():
     # Ring edge fillets on outer sphere-plane edges, inner bore-plane edges,
     # and shaft-plane edges for smooth ring-to-shaft transition
     try:
-        # Outer edges: long circular arcs where tilted planes meet the sphere
+        # Outer edges: long arcs where tilted planes meet the sphere
         outer_fillet_edges = [
             e for e in ring_assembly.edges()
-            if e.length > 30
+            if e.length > 2 * sphere_r
             and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
             and abs(e.center().X) < 1.0
-            and abs(e.center().Y) < 2.0
+            and abs(e.center().Y) < plane_intercept + 0.2
         ]
         if outer_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.5, edge_list=outer_fillet_edges
+                radius=ring_outer_fillet_r, edge_list=outer_fillet_edges
             )
     except Exception:
         pass
@@ -139,61 +165,61 @@ def create_peghead():
     try:
         bore_fillet_edges = [
             e for e in ring_assembly.edges()
-            if e.length > 20
+            if e.length > 2 * bore_r
             and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
-            and math.hypot(e.center().X, e.center().Y) > 4.0
+            and math.hypot(e.center().X, e.center().Y) > bore_r - 1
         ]
         if bore_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.4, edge_list=bore_fillet_edges
+                radius=ring_bore_fillet_r, edge_list=bore_fillet_edges
             )
     except Exception:
         pass
 
     # Shaft-plane edges: where connecting shaft meets the tilted cut planes
-    # Includes all edges along the shaft and cone where they intersect the planes
     try:
         shaft_fillet_edges = [
             e for e in ring_assembly.edges()
-            if 1.0 < e.length < 12
-            and -7 < e.center().Z < -1.5
-            and 0.3 < math.hypot(e.center().X, e.center().Y) < 3.5
+            if 1.0 < e.length < 2 * sphere_r
+            and conn_shaft_bot_z - 1 < e.center().Z < conn_shaft_top_z
+            and 0.3 < math.hypot(e.center().X, e.center().Y) < conn_flare_r + 1
         ]
         if shaft_fillet_edges:
             ring_assembly = ring_assembly.fillet(
-                radius=0.5, edge_list=shaft_fillet_edges
+                radius=shaft_plane_fillet_r, edge_list=shaft_fillet_edges
             )
     except Exception:
         pass
 
     # ═══════════════════════════════════════════════════════════
-    # 4. Gear shaft (Z=0 to 10.4)
+    # 4. Gear shaft (Z=0 to shaft_top_z)
     # ═══════════════════════════════════════════════════════════
 
     gear_shaft = bd.Cylinder(
         radius=shaft_r,
-        height=shaft_top_z,
+        height=shaft_height,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
     )
 
     # ═══════════════════════════════════════════════════════════
-    # 5. Shoulder (Z=-1.2 to 0)
+    # 5. Shoulder (shoulder_bot_z to 0)
     # ═══════════════════════════════════════════════════════════
 
     shoulder = bd.Cylinder(
         radius=shoulder_r,
-        height=shoulder_top_z - shoulder_bot_z,
+        height=shoulder_height,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
     ).translate(bd.Vector(0, 0, shoulder_bot_z))
 
     # ═══════════════════════════════════════════════════════════
-    # 6. Cap torus dome (Z=-1.2 to -2.2)
+    # 6. Cap torus dome (dome_top_z to dome_bot_z)
     # ═══════════════════════════════════════════════════════════
 
-    arc_start_r = torus_major_r + torus_minor_r * math.cos(math.radians(30))
-    arc_start_z = torus_cz - torus_minor_r * math.sin(math.radians(30))
-    arc_mid_r = torus_major_r + torus_minor_r * math.cos(math.radians(60))
-    arc_mid_z = torus_cz - torus_minor_r * math.sin(math.radians(60))
+    # Profile points on the torus cross-section, swept from arc_start to arc_end
+    arc_start_r = torus_major_r + torus_minor_r * math.cos(math.radians(torus_arc_start_angle))
+    arc_start_z = torus_cz - torus_minor_r * math.sin(math.radians(torus_arc_start_angle))
+    arc_mid_r = torus_major_r + torus_minor_r * math.cos(math.radians(torus_arc_end_angle))
+    arc_mid_z = torus_cz - torus_minor_r * math.sin(math.radians(torus_arc_end_angle))
     arc_end_r = torus_major_r
     arc_end_z = dome_bot_z
 
@@ -216,17 +242,15 @@ def create_peghead():
     # 7. Stalk and pip
     # ═══════════════════════════════════════════════════════════
 
-    stalk_top_inside = sphere_bot_z + 0.5  # -17.2
-    stalk_bot = pip_top_z
     stalk = bd.Cylinder(
         radius=stalk_r,
-        height=stalk_top_inside - stalk_bot,
+        height=stalk_top_z - pip_top_z,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MAX),
-    ).translate(bd.Vector(0, 0, stalk_top_inside))
+    ).translate(bd.Vector(0, 0, stalk_top_z))
 
     pip = bd.Cylinder(
         radius=pip_r,
-        height=pip_top_z - pip_bot_z,
+        height=pip_height,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
     ).translate(bd.Vector(0, 0, pip_bot_z))
 
@@ -236,26 +260,25 @@ def create_peghead():
 
     pip_assembly = pip.fuse(stalk)
 
-    # Apply pip fillets on the simpler sub-assembly (avoids extra BSpline faces)
     try:
         pip_top_edges = [
             e for e in pip_assembly.edges()
-            if abs(e.center().Z - pip_top_z) < 0.3
-            and 0.8 < math.hypot(e.center().X, e.center().Y) < 1.5
+            if abs(e.center().Z - pip_top_z) < pip_fillet_r
+            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
         ]
         if pip_top_edges:
-            pip_assembly = pip_assembly.fillet(radius=0.3, edge_list=pip_top_edges)
+            pip_assembly = pip_assembly.fillet(radius=pip_fillet_r, edge_list=pip_top_edges)
     except Exception:
         pass
 
     try:
         pip_bot_edges = [
             e for e in pip_assembly.edges()
-            if abs(e.center().Z - pip_bot_z) < 0.3
-            and 0.8 < math.hypot(e.center().X, e.center().Y) < 1.5
+            if abs(e.center().Z - pip_bot_z) < pip_fillet_r
+            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
         ]
         if pip_bot_edges:
-            pip_assembly = pip_assembly.fillet(radius=0.3, edge_list=pip_bot_edges)
+            pip_assembly = pip_assembly.fillet(radius=pip_fillet_r, edge_list=pip_bot_edges)
     except Exception:
         pass
 
@@ -271,10 +294,7 @@ def create_peghead():
         .fuse(pip_assembly)
     )
 
-    # Tiny boss on gear shaft top: creates d≈0.597 cylinder face
-    # (matches reference ring-fillet termination patches, negligible geometry impact)
-    boss_r = 0.2985  # d=0.597
-    boss_h = 0.005
+    # Cosmetic boss on gear shaft tip
     boss = bd.Cylinder(
         radius=boss_r, height=boss_h,
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
