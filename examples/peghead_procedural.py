@@ -4,7 +4,7 @@ Builds a guitar tuning peg button by:
 1. Cutting a sphere with two slightly tilted planes (using split)
 2. Boring a cylinder along Y through the disc
 3. Adding shaft, shoulder, cap torus dome, connecting shaft, stalk, and pip
-4. Applying fillets for smooth transitions
+4. Fusing all raw geometry, then applying fillets on the complete solid
 """
 
 import math
@@ -132,67 +132,12 @@ def create_peghead():
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
     ).translate(bd.Vector(0, 0, conn_shaft_bot_z))
 
-    # Fuse upper + lower, then clip by tilted planes
     conn_shaft = conn_upper.fuse(conn_lower)
     conn_shaft = conn_shaft.split(plane1)
     conn_shaft = conn_shaft.split(plane2)
 
     # ═══════════════════════════════════════════════════════════
-    # 3. Fuse ring + connecting shaft, then apply ring edge fillets
-    # ═══════════════════════════════════════════════════════════
-
-    ring_assembly = ring.fuse(conn_shaft)
-
-    # Ring edge fillets on outer sphere-plane edges, inner bore-plane edges,
-    # and shaft-plane edges for smooth ring-to-shaft transition
-    try:
-        # Outer edges: long arcs where tilted planes meet the sphere
-        outer_fillet_edges = [
-            e for e in ring_assembly.edges()
-            if e.length > 2 * sphere_r
-            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
-            and abs(e.center().X) < 1.0
-            and abs(e.center().Y) < plane_intercept + 0.2
-        ]
-        if outer_fillet_edges:
-            ring_assembly = ring_assembly.fillet(
-                radius=ring_outer_fillet_r, edge_list=outer_fillet_edges
-            )
-    except Exception:
-        pass
-
-    # Inner bore edges: where bore cylinder meets the tilted cut planes
-    try:
-        bore_fillet_edges = [
-            e for e in ring_assembly.edges()
-            if e.length > 2 * bore_r
-            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
-            and math.hypot(e.center().X, e.center().Y) > bore_r - 1
-        ]
-        if bore_fillet_edges:
-            ring_assembly = ring_assembly.fillet(
-                radius=ring_bore_fillet_r, edge_list=bore_fillet_edges
-            )
-    except Exception:
-        pass
-
-    # Shaft-plane edges: where connecting shaft meets the tilted cut planes
-    try:
-        shaft_fillet_edges = [
-            e for e in ring_assembly.edges()
-            if 1.0 < e.length < 2 * sphere_r
-            and conn_shaft_bot_z - 1 < e.center().Z < conn_shaft_top_z
-            and 0.3 < math.hypot(e.center().X, e.center().Y) < conn_flare_r + 1
-        ]
-        if shaft_fillet_edges:
-            ring_assembly = ring_assembly.fillet(
-                radius=shaft_plane_fillet_r, edge_list=shaft_fillet_edges
-            )
-    except Exception:
-        pass
-
-    # ═══════════════════════════════════════════════════════════
-    # 4. Gear shaft (Z=0 to shaft_top_z)
+    # 3. Gear shaft (Z=0 to shaft_top_z)
     # ═══════════════════════════════════════════════════════════
 
     gear_shaft = bd.Cylinder(
@@ -202,7 +147,7 @@ def create_peghead():
     )
 
     # ═══════════════════════════════════════════════════════════
-    # 5. Shoulder (shoulder_bot_z to 0)
+    # 4. Shoulder (shoulder_bot_z to 0)
     # ═══════════════════════════════════════════════════════════
 
     shoulder = bd.Cylinder(
@@ -212,10 +157,9 @@ def create_peghead():
     ).translate(bd.Vector(0, 0, shoulder_bot_z))
 
     # ═══════════════════════════════════════════════════════════
-    # 6. Cap torus dome (dome_top_z to dome_bot_z)
+    # 5. Cap torus dome (dome_top_z to dome_bot_z)
     # ═══════════════════════════════════════════════════════════
 
-    # Profile points on the torus cross-section, swept from arc_start to arc_end
     arc_start_r = torus_major_r + torus_minor_r * math.cos(math.radians(torus_arc_start_angle))
     arc_start_z = torus_cz - torus_minor_r * math.sin(math.radians(torus_arc_start_angle))
     arc_mid_r = torus_major_r + torus_minor_r * math.cos(math.radians(torus_arc_end_angle))
@@ -239,7 +183,7 @@ def create_peghead():
     dome = dome_build.part
 
     # ═══════════════════════════════════════════════════════════
-    # 7. Stalk and pip
+    # 6. Stalk and pip
     # ═══════════════════════════════════════════════════════════
 
     stalk = bd.Cylinder(
@@ -255,43 +199,17 @@ def create_peghead():
     ).translate(bd.Vector(0, 0, pip_bot_z))
 
     # ═══════════════════════════════════════════════════════════
-    # 8. Fuse stalk + pip, apply pip fillets on sub-assembly
-    # ═══════════════════════════════════════════════════════════
-
-    pip_assembly = pip.fuse(stalk)
-
-    try:
-        pip_top_edges = [
-            e for e in pip_assembly.edges()
-            if abs(e.center().Z - pip_top_z) < pip_fillet_r
-            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
-        ]
-        if pip_top_edges:
-            pip_assembly = pip_assembly.fillet(radius=pip_fillet_r, edge_list=pip_top_edges)
-    except Exception:
-        pass
-
-    try:
-        pip_bot_edges = [
-            e for e in pip_assembly.edges()
-            if abs(e.center().Z - pip_bot_z) < pip_fillet_r
-            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
-        ]
-        if pip_bot_edges:
-            pip_assembly = pip_assembly.fillet(radius=pip_fillet_r, edge_list=pip_bot_edges)
-    except Exception:
-        pass
-
-    # ═══════════════════════════════════════════════════════════
-    # 9. Fuse everything
+    # 7. Fuse ALL raw geometry into one solid before any fillets
     # ═══════════════════════════════════════════════════════════
 
     solid = (
-        ring_assembly
+        ring
+        .fuse(conn_shaft)
         .fuse(dome)
         .fuse(shoulder)
         .fuse(gear_shaft)
-        .fuse(pip_assembly)
+        .fuse(stalk)
+        .fuse(pip)
     )
 
     # Cosmetic boss on gear shaft tip
@@ -300,6 +218,79 @@ def create_peghead():
         align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
     ).translate(bd.Vector(0, 0, shaft_top_z))
     solid = solid.fuse(boss)
+
+    # ═══════════════════════════════════════════════════════════
+    # 8. Apply all fillets on the complete solid
+    # ═══════════════════════════════════════════════════════════
+
+    # Outer ring edges: long arcs where tilted planes meet the sphere
+    try:
+        outer_fillet_edges = [
+            e for e in solid.edges()
+            if e.length > 2 * sphere_r
+            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
+            and abs(e.center().X) < 1.0
+            and abs(e.center().Y) < plane_intercept + 0.2
+        ]
+        if outer_fillet_edges:
+            solid = solid.fillet(
+                radius=ring_outer_fillet_r, edge_list=outer_fillet_edges
+            )
+    except Exception:
+        pass
+
+    # Inner bore edges: where bore cylinder meets the tilted cut planes
+    try:
+        bore_fillet_edges = [
+            e for e in solid.edges()
+            if e.length > 2 * bore_r
+            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
+            and math.hypot(e.center().X, e.center().Y) > bore_r - 1
+        ]
+        if bore_fillet_edges:
+            solid = solid.fillet(
+                radius=ring_bore_fillet_r, edge_list=bore_fillet_edges
+            )
+    except Exception:
+        pass
+
+    # Shaft-plane edges: where connecting shaft meets the tilted cut planes
+    try:
+        shaft_fillet_edges = [
+            e for e in solid.edges()
+            if 1.0 < e.length < 2 * sphere_r
+            and conn_shaft_bot_z - 1 < e.center().Z < conn_shaft_top_z
+            and 0.3 < math.hypot(e.center().X, e.center().Y) < conn_flare_r + 1
+        ]
+        if shaft_fillet_edges:
+            solid = solid.fillet(
+                radius=shaft_plane_fillet_r, edge_list=shaft_fillet_edges
+            )
+    except Exception:
+        pass
+
+    # Pip fillets: top and bottom edges of pip cylinder
+    try:
+        pip_top_edges = [
+            e for e in solid.edges()
+            if abs(e.center().Z - pip_top_z) < pip_fillet_r
+            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
+        ]
+        if pip_top_edges:
+            solid = solid.fillet(radius=pip_fillet_r, edge_list=pip_top_edges)
+    except Exception:
+        pass
+
+    try:
+        pip_bot_edges = [
+            e for e in solid.edges()
+            if abs(e.center().Z - pip_bot_z) < pip_fillet_r
+            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
+        ]
+        if pip_bot_edges:
+            solid = solid.fillet(radius=pip_fillet_r, edge_list=pip_bot_edges)
+    except Exception:
+        pass
 
     return solid
 
