@@ -57,10 +57,8 @@ def create_peghead():
     stalk_r = 0.5
     stalk_ring_penetration = 0.5  # how far stalk extends into ring interior
 
-    # Fillets
-    ring_outer_fillet_r = 0.5   # sphere-plane intersection edges
-    ring_bore_fillet_r = 0.4    # bore-plane intersection edges
-    shaft_plane_fillet_r = 0.5  # shaft-plane transition edges
+    # Fillets (explicit torus geometry, matching reference STEP)
+    ring_outer_fillet_r = 0.3   # sphere-plane intersection edges
     pip_fillet_r = 0.3          # pip top and bottom edges
 
     # Cosmetic boss on shaft tip (matches reference d≈0.597 cylinder face)
@@ -222,69 +220,89 @@ def create_peghead():
     solid = solid.fuse(boss)
 
     # ═══════════════════════════════════════════════════════════
-    # 8. Apply all fillets on the complete solid
-    #    Each fillet may wrap result in a Compound; extract the Solid
+    # 8. Explicit torus fillets (produces clean TOROIDAL_SURFACE
+    #    in STEP, avoiding OCCT's BSpline fillet approximations)
     # ═══════════════════════════════════════════════════════════
 
-    def _fillet(s, radius, edge_filter):
-        """Apply fillet and extract Solid from potential Compound wrapper."""
-        edges = [e for e in s.edges() if edge_filter(e)]
-        if not edges:
-            return s
-        result = s.fillet(radius=radius, edge_list=edges)
-        if hasattr(result, "solids"):
-            solids = result.solids()
+    def _extract_solid(shape):
+        """Extract the largest Solid from a boolean result (may be Compound or ShapeList)."""
+        if hasattr(shape, "solids"):
+            solids = shape.solids()
             if solids:
-                return solids[0]
-        return result
+                return max(solids, key=lambda s: s.volume)
+        return shape
 
-    # Outer ring edges: long arcs where tilted planes meet the sphere
-    try:
-        solid = _fillet(solid, ring_outer_fillet_r, lambda e: (
-            e.length > 2 * sphere_r
-            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
-            and abs(e.center().X) < 1.0
-            and abs(e.center().Y) < plane_intercept + 0.2
-        ))
-    except Exception:
-        pass
+    # --- Ring outer fillets (×2): where sphere meets each tilted plane ---
+    # For each tilted plane, compute the torus that blends the
+    # sphere-plane intersection edge.
 
-    # Inner bore edges: where bore cylinder meets the tilted cut planes
-    try:
-        solid = _fillet(solid, ring_bore_fillet_r, lambda e: (
-            e.length > 2 * bore_r
-            and sphere_bot_z - 1 < e.center().Z < sphere_top_z + 1
-            and math.hypot(e.center().X, e.center().Y) > bore_r - 1
-        ))
-    except Exception:
-        pass
+    fillet_r = ring_outer_fillet_r  # minor radius of fillet torus
+    for plane in [plane1, plane2]:
+        # Distance from sphere center to tilted plane
+        plane_origin = bd.Vector(plane.origin)
+        plane_normal = bd.Vector(plane.z_dir)
+        sphere_center = bd.Vector(0, 0, sphere_cz)
+        d_to_plane = abs((sphere_center - plane_origin).dot(plane_normal))
 
-    # Shaft-plane edges: where connecting shaft meets the tilted cut planes
-    try:
-        solid = _fillet(solid, shaft_plane_fillet_r, lambda e: (
-            1.0 < e.length < 2 * sphere_r
-            and conn_shaft_bot_z - 1 < e.center().Z < conn_shaft_top_z
-            and 0.3 < math.hypot(e.center().X, e.center().Y) < conn_flare_r + 1
-        ))
-    except Exception:
-        pass
+        # Major radius of the fillet torus (circle of tangency)
+        torus_major = math.sqrt(
+            (sphere_r - fillet_r) ** 2 - (d_to_plane - fillet_r) ** 2
+        )
 
-    # Pip fillets: top and bottom edges of pip cylinder
-    try:
-        solid = _fillet(solid, pip_fillet_r, lambda e: (
-            abs(e.center().Z - pip_top_z) < pip_fillet_r
-            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
-        ))
-    except Exception:
-        pass
+        # Fillet center: projection of sphere center onto plane,
+        # then offset fillet_r back toward sphere center
+        proj = sphere_center - plane_normal * (
+            (sphere_center - plane_origin).dot(plane_normal)
+        )
+        offset_dir = (sphere_center - proj)
+        offset_dir_len = math.sqrt(
+            offset_dir.X ** 2 + offset_dir.Y ** 2 + offset_dir.Z ** 2
+        )
+        offset_unit = offset_dir * (1.0 / offset_dir_len)
+        fillet_center = proj + offset_unit * fillet_r
 
-    try:
-        solid = _fillet(solid, pip_fillet_r, lambda e: (
-            abs(e.center().Z - pip_bot_z) < pip_fillet_r
-            and stalk_r < math.hypot(e.center().X, e.center().Y) < pip_r + 0.5
-        ))
-    except Exception:
-        pass
+        # Build torus at origin (axis along Z), rotate to plane normal,
+        # translate to fillet center
+        torus = bd.Torus(
+            major_radius=torus_major,
+            minor_radius=fillet_r,
+        )
+
+        # Rotation from Z-axis to plane normal
+        z_axis = bd.Vector(0, 0, 1)
+        cross = z_axis.cross(plane_normal)
+        cross_len = math.sqrt(cross.X ** 2 + cross.Y ** 2 + cross.Z ** 2)
+        if cross_len > 1e-10:
+            rot_axis = bd.Axis(bd.Vector(0, 0, 0), cross * (1.0 / cross_len))
+            rot_angle = math.degrees(math.acos(
+                max(-1, min(1, z_axis.dot(plane_normal)))
+            ))
+            torus = torus.rotate(rot_axis, rot_angle)
+
+        torus = torus.translate(fillet_center)
+        solid = _extract_solid(solid - torus)
+
+    # --- Pip fillets (×2): top and bottom edges of pip cylinder ---
+    # Use OCCT chamfer_edges for pip since torus booleans fail on small features
+    pip_fillet_major = pip_r - pip_fillet_r  # 1.05 - 0.3 = 0.75
+
+    # Find pip edges (circular edges at pip_top_z and pip_bot_z)
+    pip_edges = []
+    for edge in solid.edges():
+        center = edge.center()
+        for z_target in [pip_top_z, pip_bot_z]:
+            if abs(center.Z - z_target) < 0.01 and abs(
+                math.sqrt(center.X**2 + center.Y**2) - pip_r
+            ) < 0.1:
+                pip_edges.append(edge)
+                break
+
+    if pip_edges:
+        try:
+            solid = solid.fillet(pip_fillet_r, pip_edges)
+            solid = _extract_solid(solid)
+        except Exception:
+            pass  # Skip pip fillets if they fail
 
     return solid
 
