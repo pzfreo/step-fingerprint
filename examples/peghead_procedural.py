@@ -291,12 +291,17 @@ def create_peghead():
 
 if __name__ == "__main__":
     import os
+    from OCP.STEPControl import STEPControl_Writer, STEPControl_AsIs
+    from OCP.Interface import Interface_Static
 
     solid = create_peghead()
 
-    # Export STEP file
+    # Export STEP using OCP writer directly (avoids Compound wrapping)
     out_path = os.path.join(os.path.dirname(__file__), "peghead_procedural.step")
-    bd.export_step(solid, out_path)
+    writer = STEPControl_Writer()
+    Interface_Static.SetCVal_s("write.step.schema", "AP214")
+    writer.Transfer(solid.wrapped, STEPControl_AsIs)
+    writer.Write(out_path)
     print(f"Exported STEP to {out_path}")
 
     # Show in OCP CAD Viewer if available (VS Code extension)
