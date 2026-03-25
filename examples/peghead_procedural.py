@@ -112,6 +112,34 @@ def create_peghead():
     ring = ring_disc - bore_cyl
     ring = ring.solids()[0]
 
+    # Fillet ring outer edges (sphere-plane) while ring is simple geometry.
+    # Must happen before fusing with other parts — OCCT fillet on the
+    # full solid produces bloated BSplines, and subsequent fillet() calls
+    # rebuild from shape history, undoing any earlier torus subtracts.
+    ring_outer_edges = []
+    for edge in ring.edges():
+        center = edge.center()
+        d_sphere = abs(
+            math.sqrt(center.X ** 2 + center.Y ** 2 + (center.Z - sphere_cz) ** 2)
+            - sphere_r
+        )
+        if d_sphere < 0.1:
+            for plane in [plane1, plane2]:
+                po = bd.Vector(plane.origin)
+                pn = bd.Vector(plane.z_dir)
+                ec = bd.Vector(center.X, center.Y, center.Z)
+                if abs((ec - po).dot(pn)) < 0.01:
+                    ring_outer_edges.append(edge)
+                    break
+
+    if ring_outer_edges:
+        try:
+            ring = ring.fillet(ring_outer_fillet_r, ring_outer_edges)
+            if hasattr(ring, "solids") and ring.solids():
+                ring = ring.solids()[0]
+        except Exception:
+            pass  # Fall back to unfilleted ring
+
     # ═══════════════════════════════════════════════════════════
     # 2. Connecting shaft: dome bottom into ring
     #    Clipped by tilted planes for correct Y extent
@@ -220,93 +248,25 @@ def create_peghead():
     solid = solid.fuse(boss)
 
     # ═══════════════════════════════════════════════════════════
-    # 8. Explicit torus fillets (produces clean TOROIDAL_SURFACE
-    #    in STEP, avoiding OCCT's BSpline fillet approximations)
+    # 8. Pip fillets
     # ═══════════════════════════════════════════════════════════
 
-    def _extract_solid(shape):
-        """Extract the largest Solid from a boolean result (may be Compound or ShapeList)."""
-        if hasattr(shape, "solids"):
-            solids = shape.solids()
-            if solids:
-                return max(solids, key=lambda s: s.volume)
-        return shape
-
-    # --- Ring outer fillets (×2): explicit torus subtract at sphere-plane edges ---
-    # OCCT fillet produces huge BSpline approximations for these edges,
-    # so we use exact torus geometry instead.
-    fillet_r = ring_outer_fillet_r
-    for plane in [plane1, plane2]:
-        plane_origin = bd.Vector(plane.origin)
-        plane_normal = bd.Vector(plane.z_dir)
-        sphere_center = bd.Vector(0, 0, sphere_cz)
-        signed_d = (sphere_center - plane_origin).dot(plane_normal)
-        d_to_plane = abs(signed_d)
-
-        torus_major = math.sqrt(
-            (sphere_r - fillet_r) ** 2 - (d_to_plane - fillet_r) ** 2
-        )
-
-        # Torus center: on plane, offset fillet_r toward sphere center
-        proj = sphere_center - plane_normal * signed_d
-        fillet_center = proj + plane_normal * (
-            fillet_r if signed_d > 0 else -fillet_r
-        )
-
-        torus = bd.Torus(major_radius=torus_major, minor_radius=fillet_r)
-
-        # Rotate torus from Z-axis to plane normal
-        z_axis = bd.Vector(0, 0, 1)
-        cross = z_axis.cross(plane_normal)
-        cross_len = math.sqrt(cross.X ** 2 + cross.Y ** 2 + cross.Z ** 2)
-        if cross_len > 1e-10:
-            rot_axis = bd.Axis(bd.Vector(0, 0, 0), cross * (1.0 / cross_len))
-            rot_angle = math.degrees(
-                math.acos(max(-1, min(1, z_axis.dot(plane_normal))))
-            )
-            torus = torus.rotate(rot_axis, rot_angle)
-
-        torus = torus.translate(fillet_center)
-        solid = _extract_solid(solid - torus)
-
-    # --- Pip + bore-plane fillets via OCCT fillet API ---
-    fillet_edges = []
-
-    # Bore-plane inner edges (where bore cylinder meets tilted planes)
-    for edge in solid.edges():
-        center = edge.center()
-        r = math.sqrt(center.X ** 2 + center.Y ** 2)
-        if abs(r - bore_r) < 0.5 and r > bore_r - 0.5:
-            for plane in [plane1, plane2]:
-                po = bd.Vector(plane.origin)
-                pn = bd.Vector(plane.z_dir)
-                ec = bd.Vector(center.X, center.Y, center.Z)
-                dist = abs((ec - po).dot(pn))
-                if dist < 0.01:
-                    fillet_edges.append((edge, ring_outer_fillet_r))
-                    break
-
-    # Pip edges: top and bottom circular edges of pip cylinder
+    pip_edges = []
     for edge in solid.edges():
         center = edge.center()
         r = math.sqrt(center.X ** 2 + center.Y ** 2)
         for z_target in [pip_top_z, pip_bot_z]:
             if abs(center.Z - z_target) < 0.01 and abs(r - pip_r) < 0.1:
-                fillet_edges.append((edge, pip_fillet_r))
+                pip_edges.append(edge)
                 break
 
-    # Apply fillets grouped by radius
-    from collections import defaultdict
-    by_radius = defaultdict(list)
-    for edge, radius in fillet_edges:
-        by_radius[radius].append(edge)
-
-    for radius, edges in by_radius.items():
+    if pip_edges:
         try:
-            solid = solid.fillet(radius, edges)
-            solid = _extract_solid(solid)
-        except Exception as e:
-            print(f"Warning: fillet r={radius} failed: {e}")
+            solid = solid.fillet(pip_fillet_r, pip_edges)
+            if hasattr(solid, "solids") and solid.solids():
+                solid = solid.solids()[0]
+        except Exception:
+            pass
 
     return solid
 
