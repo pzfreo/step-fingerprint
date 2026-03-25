@@ -177,9 +177,10 @@ def create_peghead_simple():
     r_at_sphere = math.sqrt(
         sphere_r ** 2 - (conn_shaft_bot_z - sphere_cz) ** 2
     )
-    # Sphere tangent direction at (r, z): perpendicular to radius = (-(z-cz), r)
+    # Sphere tangent at (r, z): perpendicular to radius, pointing downward
+    # along sphere surface = (z-cz, -r) in (dr, dz) convention
     sphere_dz = conn_shaft_bot_z - sphere_cz
-    sphere_tan = (-sphere_dz, r_at_sphere)  # (dr, dz) direction along sphere
+    sphere_tan = (sphere_dz, -r_at_sphere)  # (dr, dz) continuing down sphere
 
     # Dome tangent at bottom: the torus arc ends with horizontal tangent
     # (purely radial, no Z component), so connector top tangent is vertical
