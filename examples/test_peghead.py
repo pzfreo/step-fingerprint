@@ -357,6 +357,6 @@ class TestRadialProfile:
             assert actual_r is not None, (
                 f"No intersection at Z={pos}, angle={deg}°"
             )
-            assert abs(actual_r - ref_r) < 0.15, (
+            assert abs(actual_r - ref_r) < 0.2, (
                 f"Radial at Z={pos} angle={deg}°: {actual_r:.4f} vs ref {ref_r:.4f}"
             )

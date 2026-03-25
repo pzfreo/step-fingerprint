@@ -58,7 +58,7 @@ def create_peghead():
     stalk_ring_penetration = 0.5  # how far stalk extends into ring interior
 
     # Fillets (explicit torus geometry, matching reference STEP)
-    ring_outer_fillet_r = 0.3   # sphere-plane intersection edges
+    ring_outer_fillet_r = 0.5   # sphere-plane intersection edges
     pip_fillet_r = 0.3          # pip top and bottom edges
 
     # Cosmetic boss on shaft tip (matches reference d≈0.597 cylinder face)
