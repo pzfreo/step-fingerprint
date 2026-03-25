@@ -169,23 +169,40 @@ def create_peghead_simple():
             pass
 
     # ═══════════════════════════════════════════════════════════
-    # 3. Connecting shaft: clipped by tilted planes
+    # 3. Connecting shaft: smooth spline revolve, clipped by planes
+    #    Meets dome tangentially at top and sphere tangentially at bottom
     # ═══════════════════════════════════════════════════════════
 
-    conn_upper = bd.Cylinder(
-        radius=conn_r,
-        height=conn_shaft_top_z - conn_flare_z,
-        align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
-    ).translate(bd.Vector(0, 0, conn_flare_z))
+    # Sphere tangent at connection point (conn_shaft_bot_z)
+    r_at_sphere = math.sqrt(
+        sphere_r ** 2 - (conn_shaft_bot_z - sphere_cz) ** 2
+    )
+    # Sphere tangent direction at (r, z): perpendicular to radius = (-(z-cz), r)
+    sphere_dz = conn_shaft_bot_z - sphere_cz
+    sphere_tan = (-sphere_dz, r_at_sphere)  # (dr, dz) direction along sphere
 
-    conn_lower = bd.Cone(
-        bottom_radius=conn_flare_r,
-        top_radius=conn_r,
-        height=conn_flare_z - conn_shaft_bot_z,
-        align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
-    ).translate(bd.Vector(0, 0, conn_shaft_bot_z))
+    # Dome tangent at bottom: the torus arc ends with horizontal tangent
+    # (purely radial, no Z component), so connector top tangent is vertical
+    dome_tan = (0, -1)  # pointing downward along axis
 
-    conn_shaft = conn_upper.fuse(conn_lower).split(plane1).split(plane2)
+    with bd.BuildPart() as conn_build:
+        with bd.BuildSketch(bd.Plane.XZ) as sk:
+            with bd.BuildLine() as ln:
+                bd.Spline(
+                    (conn_r, conn_shaft_top_z),
+                    (conn_r, conn_flare_z),
+                    (r_at_sphere, conn_shaft_bot_z),
+                    tangents=(dome_tan, sphere_tan),
+                )
+                # Close: bottom along sphere radius to axis, up axis, back
+                bd.Line(
+                    (r_at_sphere, conn_shaft_bot_z), (0, conn_shaft_bot_z)
+                )
+                bd.Line((0, conn_shaft_bot_z), (0, conn_shaft_top_z))
+                bd.Line((0, conn_shaft_top_z), (conn_r, conn_shaft_top_z))
+            bd.make_face()
+        bd.revolve(axis=bd.Axis.Z)
+    conn_shaft = conn_build.part.split(plane1).split(plane2)
 
     # ═══════════════════════════════════════════════════════════
     # 4. Stalk + pip: single revolve with pip fillets in profile
