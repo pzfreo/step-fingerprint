@@ -38,15 +38,16 @@ def create_peghead_simple():
     pip_height = 1.2             # pip cylinder height
 
     # -- Cap (rounded underside of shoulder, built as a torus arc) --
-    #    Revolved torus arc that curves from the shoulder outer edge
-    #    down to the ringshaft. Think of a mushroom cap profile.
-    #    cap_flat_ratio = fraction of shoulder_r where the arc flattens.
-    #    cap_minor_r = arc radius = controls how deep/round the cap is.
-    cap_flat_ratio = 2 / 3           # cap flattens at this fraction of shoulder_r
-    cap_flat_r = shoulder_r * cap_flat_ratio
-    cap_minor_r = 2.0            # arc radius — sets cap depth
-    cap_arc_start_deg = 30       # where cap arc meets shoulder bottom
-    cap_arc_mid_deg = 60         # midpoint for three-point arc construction
+    #    Revolved torus arc that curves from the cap outer edge inward.
+    #    cap_r = outer radius of the cap (widest point of the arc).
+    #    cap_flat_ratio = fraction of cap_r where the arc flattens out.
+    #    cap_minor_r is derived so the arc spans from cap_r to cap_flat_r.
+    cap_r = 4.25                     # cap outer radius
+    cap_flat_ratio = 2 / 3           # cap flattens at this fraction of cap_r
+    cap_arc_start_deg = 30           # where cap arc meets shoulder bottom
+    cap_arc_mid_deg = 60             # midpoint for three-point arc construction
+    cap_flat_r = cap_r * cap_flat_ratio
+    cap_minor_r = (cap_r - cap_flat_r) / math.cos(math.radians(cap_arc_start_deg))
 
     # -- Ring (sphere sliced by two near-parallel planes, bored out) --
     sphere_r = 6.25              # ring sphere radius
