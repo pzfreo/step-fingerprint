@@ -232,18 +232,52 @@ def create_peghead():
                 return max(solids, key=lambda s: s.volume)
         return shape
 
-    # --- Fillets: find target edges and apply OCCT fillet ---
+    # --- Ring outer fillets (×2): explicit torus subtract at sphere-plane edges ---
+    # OCCT fillet produces huge BSpline approximations for these edges,
+    # so we use exact torus geometry instead.
+    fillet_r = ring_outer_fillet_r
+    for plane in [plane1, plane2]:
+        plane_origin = bd.Vector(plane.origin)
+        plane_normal = bd.Vector(plane.z_dir)
+        sphere_center = bd.Vector(0, 0, sphere_cz)
+        signed_d = (sphere_center - plane_origin).dot(plane_normal)
+        d_to_plane = abs(signed_d)
+
+        torus_major = math.sqrt(
+            (sphere_r - fillet_r) ** 2 - (d_to_plane - fillet_r) ** 2
+        )
+
+        # Torus center: on plane, offset fillet_r toward sphere center
+        proj = sphere_center - plane_normal * signed_d
+        fillet_center = proj + plane_normal * (
+            fillet_r if signed_d > 0 else -fillet_r
+        )
+
+        torus = bd.Torus(major_radius=torus_major, minor_radius=fillet_r)
+
+        # Rotate torus from Z-axis to plane normal
+        z_axis = bd.Vector(0, 0, 1)
+        cross = z_axis.cross(plane_normal)
+        cross_len = math.sqrt(cross.X ** 2 + cross.Y ** 2 + cross.Z ** 2)
+        if cross_len > 1e-10:
+            rot_axis = bd.Axis(bd.Vector(0, 0, 0), cross * (1.0 / cross_len))
+            rot_angle = math.degrees(
+                math.acos(max(-1, min(1, z_axis.dot(plane_normal))))
+            )
+            torus = torus.rotate(rot_axis, rot_angle)
+
+        torus = torus.translate(fillet_center)
+        solid = _extract_solid(solid - torus)
+
+    # --- Pip + bore-plane fillets via OCCT fillet API ---
     fillet_edges = []
 
-    # Ring outer edges: where sphere meets each tilted plane
+    # Bore-plane inner edges (where bore cylinder meets tilted planes)
     for edge in solid.edges():
         center = edge.center()
         r = math.sqrt(center.X ** 2 + center.Y ** 2)
-        # Sphere-plane intersection edges are large-radius circles
-        # near the sphere center Z, with r close to sphere edge
-        if r > bore_r and r < sphere_r + 0.1:
+        if abs(r - bore_r) < 0.5 and r > bore_r - 0.5:
             for plane in [plane1, plane2]:
-                # Check if edge center lies on the plane
                 po = bd.Vector(plane.origin)
                 pn = bd.Vector(plane.z_dir)
                 ec = bd.Vector(center.X, center.Y, center.Z)
