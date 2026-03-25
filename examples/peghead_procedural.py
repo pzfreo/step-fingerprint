@@ -309,16 +309,24 @@ def create_peghead():
 
 if __name__ == "__main__":
     import os
-    from OCP.STEPControl import STEPControl_Writer, STEPControl_AsIs
+    from OCP.STEPControl import (
+        STEPControl_Writer,
+        STEPControl_ManifoldSolidBrep,
+    )
     from OCP.Interface import Interface_Static
+    from OCP.ShapeFix import ShapeFix_Shape
 
     solid = create_peghead()
 
-    # Export STEP using OCP writer directly (avoids Compound wrapping)
+    # Fix geometry and export as AP203 ManifoldSolidBrep (most compatible)
+    fixer = ShapeFix_Shape(solid.wrapped)
+    fixer.Perform()
+    fixed = fixer.Shape()
+
     out_path = os.path.join(os.path.dirname(__file__), "peghead_procedural.step")
     writer = STEPControl_Writer()
-    Interface_Static.SetCVal_s("write.step.schema", "AP214")
-    writer.Transfer(solid.wrapped, STEPControl_AsIs)
+    Interface_Static.SetCVal_s("write.step.schema", "AP203")
+    writer.Transfer(fixed, STEPControl_ManifoldSolidBrep)
     writer.Write(out_path)
     print(f"Exported STEP to {out_path}")
 
