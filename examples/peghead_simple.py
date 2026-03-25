@@ -1,12 +1,16 @@
 """Simplified peghead build using revolve profiles where possible.
 
-Improvements over the procedural version:
-- Upper body (shaft + shoulder + dome + boss) built as one revolve
-  instead of 4 separate primitives + fuses
-- Stalk + pip built as one revolve with pip fillets drawn directly
-  into the 2D profile (no OCCT fillet API for pip edges)
-- Ring still uses sphere → split → bore → fillet (OCCT always
-  produces BSpline for sphere-plane fillets regardless of approach)
+Part anatomy (top to bottom, positive Z to negative Z):
+  gear shaft → shoulder → cap → ringshaft → ring → stalk → pip
+
+Build approach:
+- Upper body (gear shaft + shoulder + cap + boss) as one revolve
+- Ringshaft as smooth spline revolve, tangent to cap and ring
+- Ring as sphere → split → bore → fillet
+- Stalk + pip as one revolve with pip fillets in the 2D profile
+
+Z-axis convention: Z=0 at shoulder top (datum), positive up (gear shaft),
+negative down (cap → ringshaft → ring → stalk → pip).
 """
 
 import math
@@ -17,94 +21,119 @@ def create_peghead_simple():
     """Build the guitar tuning peg head."""
 
     # ═══════════════════════════════════════════════════════════
-    # Dimensions
+    # Design parameters
     # ═══════════════════════════════════════════════════════════
 
-    sphere_r = 6.25
-    sphere_cz = -11.45
-    bore_r = 4.9
-    bore_cz = -11.7
+    # -- Cross-section radii --
+    shaft_r = 1.9                # gear shaft
+    shoulder_r = 3.5             # wider step at shaft base
+    ringshaft_r = 1.78           # narrow neck between cap and ring
+    stalk_r = 0.75               # rod connecting ring to pip (dia 1.5mm)
+    pip_r = 1.05                 # locating pip at bottom
+    bore_r = 4.9                 # string bore through ring
 
-    plane_slope = 0.0355
-    plane_intercept = 1.829
+    # -- Section lengths (measured along Z from shoulder datum) --
+    shaft_length = 10.4          # gear shaft extends upward
+    shoulder_height = 1.2        # shoulder step below datum
+    pip_height = 1.2             # pip cylinder height
 
-    shaft_r = 1.9
-    shaft_height = 10.4
-    shoulder_r = 3.5
-    shoulder_height = 1.2
+    # -- Cap (rounded underside of shoulder, built as a torus arc) --
+    #    Revolved torus arc that curves from the shoulder outer edge
+    #    down to the ringshaft. Think of a mushroom cap profile.
+    #    cap_flat_ratio = fraction of shoulder_r where the arc flattens.
+    #    cap_minor_r = arc radius = controls how deep/round the cap is.
+    cap_flat_ratio = 2 / 3           # cap flattens at this fraction of shoulder_r
+    cap_flat_r = shoulder_r * cap_flat_ratio
+    cap_minor_r = 2.0            # arc radius — sets cap depth
+    cap_arc_start_deg = 30       # where cap arc meets shoulder bottom
+    cap_arc_mid_deg = 60         # midpoint for three-point arc construction
 
-    torus_major_r = 2.5179
-    torus_minor_r = 2.0
-    torus_cz = -0.2
-    torus_arc_start_angle = 30
-    torus_arc_end_angle = 60
+    # -- Ring (sphere sliced by two near-parallel planes, bored out) --
+    sphere_r = 6.25              # ring sphere radius
+    ring_center_depth = 11.45    # depth from shoulder datum to sphere centre
+    bore_offset = 0.25           # bore axis sits this far below sphere centre
+    ring_half_thickness = 1.829  # half-thickness of ring at string axis
+    ring_taper = 0.0355          # slight inward taper of cut planes (slope)
 
-    conn_r = 1.78
-    conn_flare_r = 2.95
-    conn_flare_z = -4.5
-    conn_overlap = 0.1
-    conn_ring_penetration = 1.0
+    # -- Ringshaft (smooth spline from cap bottom to ring top) --
+    ringshaft_flare_depth = 2.3  # spline waypoint: depth below cap bottom
+                                 # (controls where ringshaft begins to flare
+                                 #  outward toward the ring sphere)
+    ringshaft_overlap = 0.1      # overlap into cap for clean boolean
+    ringshaft_ring_penetration = 1.0  # penetration into ring sphere
 
-    pip_r = 1.05
-    pip_height = 1.2
-    pip_bot_z = -19.026
-    stalk_r = 0.5
-    stalk_ring_penetration = 0.5
+    # -- Stalk + pip placement --
+    stalk_ring_penetration = 0.5 # stalk extends up into ring for boolean
+    stalk_pip_gap = 0.2          # exposed gap between ring bottom and pip top
 
-    ring_outer_fillet_r = 0.5
-    pip_fillet_r = 0.3
-    boss_r = 0.2985
-    boss_h = 0.005
+    # -- Fillets --
+    ring_outer_fillet_r = 0.5    # fillet on ring outer edges (sphere-plane)
+    pip_fillet_r = 0.3           # fillet on pip top and bottom edges
 
     # ═══════════════════════════════════════════════════════════
-    # Derived positions
+    # Derived positions (all Z computed from section lengths)
     # ═══════════════════════════════════════════════════════════
 
-    shoulder_top_z = 0.0
-    shoulder_bot_z = -shoulder_height
-    shaft_top_z = shaft_height
-    dome_bot_z = torus_cz - torus_minor_r
-    conn_shaft_top_z = dome_bot_z + conn_overlap
-    conn_shaft_bot_z = (sphere_cz + sphere_r) - conn_ring_penetration
-    sphere_bot_z = sphere_cz - sphere_r
-    pip_top_z = pip_bot_z + pip_height
+    shoulder_top_z = 0.0                          # datum
+    shoulder_bot_z = -shoulder_height              # = -1.2
+    shaft_top_z = shaft_length                     # = 10.4
+
+    # Cap torus centre: constrained so arc starts exactly at shoulder bottom
+    cap_torus_cz = (shoulder_bot_z
+                    + cap_minor_r * math.sin(math.radians(cap_arc_start_deg)))
+    cap_bot_z = cap_torus_cz - cap_minor_r        # bottom of cap arc
+
+    # Ring sphere
+    sphere_cz = -ring_center_depth                 # sphere centre
+    sphere_top_z = sphere_cz + sphere_r            # top of sphere
+    sphere_bot_z = sphere_cz - sphere_r            # bottom of sphere
+    bore_cz = sphere_cz - bore_offset              # bore axis
+
+    # Ringshaft Z range
+    ringshaft_top_z = cap_bot_z + ringshaft_overlap
+    ringshaft_bot_z = sphere_top_z - ringshaft_ring_penetration
+    ringshaft_flare_z = cap_bot_z - ringshaft_flare_depth
+
+    # Stalk and pip
     stalk_top_z = sphere_bot_z + stalk_ring_penetration
+    pip_top_z = sphere_bot_z - stalk_pip_gap
+    pip_bot_z = pip_top_z - pip_height
 
-    n = math.sqrt(1 + plane_slope ** 2)
+    # Ring cut planes (nearly parallel, slight taper)
+    n = math.sqrt(1 + ring_taper ** 2)
     plane1 = bd.Plane(
-        origin=(0, plane_intercept, 0),
-        z_dir=(0, -1 / n, plane_slope / n),
+        origin=(0, ring_half_thickness, 0),
+        z_dir=(0, -1 / n, ring_taper / n),
     )
     plane2 = bd.Plane(
-        origin=(0, -plane_intercept, 0),
-        z_dir=(0, 1 / n, plane_slope / n),
+        origin=(0, -ring_half_thickness, 0),
+        z_dir=(0, 1 / n, ring_taper / n),
     )
 
     # ═══════════════════════════════════════════════════════════
-    # 1. Upper body: single revolve (shaft+shoulder+dome+boss)
+    # 1. Upper body: single revolve (gear shaft + shoulder + cap)
     # ═══════════════════════════════════════════════════════════
 
-    arc_start_r = torus_major_r + torus_minor_r * math.cos(
-        math.radians(torus_arc_start_angle)
+    # Cap arc points (torus cross-section in the XZ half-plane)
+    arc_start_r = cap_flat_r + cap_minor_r * math.cos(
+        math.radians(cap_arc_start_deg)
     )
-    arc_start_z = torus_cz - torus_minor_r * math.sin(
-        math.radians(torus_arc_start_angle)
+    arc_start_z = cap_torus_cz - cap_minor_r * math.sin(
+        math.radians(cap_arc_start_deg)
     )
-    arc_mid_r = torus_major_r + torus_minor_r * math.cos(
-        math.radians(torus_arc_end_angle)
+    arc_mid_r = cap_flat_r + cap_minor_r * math.cos(
+        math.radians(cap_arc_mid_deg)
     )
-    arc_mid_z = torus_cz - torus_minor_r * math.sin(
-        math.radians(torus_arc_end_angle)
+    arc_mid_z = cap_torus_cz - cap_minor_r * math.sin(
+        math.radians(cap_arc_mid_deg)
     )
-    arc_end_r = torus_major_r
-    arc_end_z = dome_bot_z
+    arc_end_r = cap_flat_r
+    arc_end_z = cap_bot_z
 
     with bd.BuildPart() as upper_build:
         with bd.BuildSketch(bd.Plane.XZ) as sk:
             with bd.BuildLine() as ln:
-                bd.Line((0, shaft_top_z + boss_h), (boss_r, shaft_top_z + boss_h))
-                bd.Line((boss_r, shaft_top_z + boss_h), (boss_r, shaft_top_z))
-                bd.Line((boss_r, shaft_top_z), (shaft_r, shaft_top_z))
+                bd.Line((0, shaft_top_z), (shaft_r, shaft_top_z))
                 bd.Line((shaft_r, shaft_top_z), (shaft_r, shoulder_top_z))
                 bd.Line((shaft_r, shoulder_top_z), (shoulder_r, shoulder_top_z))
                 bd.Line((shoulder_r, shoulder_top_z), (shoulder_r, shoulder_bot_z))
@@ -115,13 +144,13 @@ def create_peghead_simple():
                     (arc_end_r, arc_end_z),
                 )
                 bd.Line((arc_end_r, arc_end_z), (0, arc_end_z))
-                bd.Line((0, arc_end_z), (0, shaft_top_z + boss_h))
+                bd.Line((0, arc_end_z), (0, shaft_top_z))
             bd.make_face()
         bd.revolve(axis=bd.Axis.Z)
     upper_body = upper_build.part
 
     # ═══════════════════════════════════════════════════════════
-    # 2. Ring: sphere → split → bore → fillet on simple geometry
+    # 2. Ring: sphere → split → bore
     # ═══════════════════════════════════════════════════════════
 
     sphere = bd.Sphere(radius=sphere_r).translate(
@@ -139,45 +168,45 @@ def create_peghead_simple():
     )
     ring = (ring_disc - bore_cyl).solids()[0]
 
-    # Ring outer fillets deferred to after connector fuse (section 5)
-    # so the fillet flows smoothly over the connector-sphere junction
+    # Ring outer fillets deferred to after ringshaft fuse (section 5)
+    # so the fillet flows smoothly over the ringshaft-sphere junction
 
     # ═══════════════════════════════════════════════════════════
-    # 3. Connecting shaft: smooth spline revolve, clipped by planes
-    #    Meets dome tangentially at top and sphere tangentially at bottom
+    # 3. Ringshaft: smooth spline revolve, clipped by ring planes
+    #    Meets cap tangentially at top and sphere tangentially at bottom
     # ═══════════════════════════════════════════════════════════
 
-    # Sphere tangent at connection point (conn_shaft_bot_z)
+    # Sphere radius at ringshaft connection point
     r_at_sphere = math.sqrt(
-        sphere_r ** 2 - (conn_shaft_bot_z - sphere_cz) ** 2
+        sphere_r ** 2 - (ringshaft_bot_z - sphere_cz) ** 2
     )
     # Sphere tangent at (r, z): perpendicular to radius, pointing downward
     # along sphere surface = (z-cz, -r) in (dr, dz) convention
-    sphere_dz = conn_shaft_bot_z - sphere_cz
+    sphere_dz = ringshaft_bot_z - sphere_cz
     sphere_tan = (sphere_dz, -r_at_sphere)  # (dr, dz) continuing down sphere
 
-    # Dome tangent at bottom: the torus arc ends with horizontal tangent
-    # (purely radial, no Z component), so connector top tangent is vertical
-    dome_tan = (0, -1)  # pointing downward along axis
+    # Cap tangent at bottom: the torus arc ends vertically (horizontal
+    # tangent in the radial direction), so ringshaft enters vertically
+    cap_tan = (0, -1)  # pointing downward along axis
 
-    with bd.BuildPart() as conn_build:
+    with bd.BuildPart() as ringshaft_build:
         with bd.BuildSketch(bd.Plane.XZ) as sk:
             with bd.BuildLine() as ln:
                 bd.Spline(
-                    (conn_r, conn_shaft_top_z),
-                    (conn_r, conn_flare_z),
-                    (r_at_sphere, conn_shaft_bot_z),
-                    tangents=(dome_tan, sphere_tan),
+                    (ringshaft_r, ringshaft_top_z),
+                    (ringshaft_r, ringshaft_flare_z),
+                    (r_at_sphere, ringshaft_bot_z),
+                    tangents=(cap_tan, sphere_tan),
                 )
-                # Close: bottom along sphere radius to axis, up axis, back
+                # Close: along sphere radius to axis, up axis, back out
                 bd.Line(
-                    (r_at_sphere, conn_shaft_bot_z), (0, conn_shaft_bot_z)
+                    (r_at_sphere, ringshaft_bot_z), (0, ringshaft_bot_z)
                 )
-                bd.Line((0, conn_shaft_bot_z), (0, conn_shaft_top_z))
-                bd.Line((0, conn_shaft_top_z), (conn_r, conn_shaft_top_z))
+                bd.Line((0, ringshaft_bot_z), (0, ringshaft_top_z))
+                bd.Line((0, ringshaft_top_z), (ringshaft_r, ringshaft_top_z))
             bd.make_face()
         bd.revolve(axis=bd.Axis.Z)
-    conn_shaft = conn_build.part.split(plane1).split(plane2)
+    ringshaft = ringshaft_build.part.split(plane1).split(plane2)
 
     # ═══════════════════════════════════════════════════════════
     # 4. Stalk + pip: single revolve with pip fillets in profile
@@ -192,10 +221,11 @@ def create_peghead_simple():
                 bd.Line((0, stalk_top_z), (stalk_r, stalk_top_z))
                 bd.Line((stalk_r, stalk_top_z), (stalk_r, pip_top_z))
                 # Pip top: step out with fillet arc
-                bd.Line(
-                    (stalk_r, pip_top_z),
-                    (pip_r - pip_fillet_r, pip_top_z),
-                )
+                if stalk_r < pip_r - pip_fillet_r - 1e-6:
+                    bd.Line(
+                        (stalk_r, pip_top_z),
+                        (pip_r - pip_fillet_r, pip_top_z),
+                    )
                 bd.ThreePointArc(
                     (pip_r - pip_fillet_r, pip_top_z),
                     (pip_r - f45, pip_top_z - f45),
@@ -221,7 +251,7 @@ def create_peghead_simple():
     stalk_pip = pip_build.part
 
     # ═══════════════════════════════════════════════════════════
-    # 5. Fuse all parts
+    # 5. Fuse all parts + ring outer fillets
     # ═══════════════════════════════════════════════════════════
 
     def _extract_solid(shape):
@@ -229,10 +259,10 @@ def create_peghead_simple():
             return max(shape.solids(), key=lambda s: s.volume)
         return shape
 
-    ring_assembly = ring.fuse(conn_shaft)
+    ring_assembly = ring.fuse(ringshaft)
 
-    # Fillet ring outer edges on ring+connector assembly so the fillet
-    # flows smoothly over the connector-sphere junction (no sharp point)
+    # Fillet ring outer edges on ring+ringshaft assembly so the fillet
+    # flows smoothly over the ringshaft-sphere junction (no sharp point)
     ring_outer_edges = []
     for edge in ring_assembly.edges():
         center = edge.center()

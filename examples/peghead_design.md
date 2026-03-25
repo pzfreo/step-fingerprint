@@ -4,91 +4,99 @@
 
 A guitar tuning peg button (head). The part you grip between your fingers to turn the tuning machine. Oriented with the Z axis along the central axis. The gear shaft end is at most positive Z; the pip end is at most negative Z.
 
-## Part Order (positive Z to negative Z, bottom to top in viewing orientation)
+Z=0 datum is the top of the shoulder.
+
+## Part Anatomy (positive Z to negative Z)
+
+```
+        ┌──┐
+        │  │  ← gear shaft (long cylinder into gear mechanism)
+        │  │
+    ┌───┘  └───┐  ← shoulder (wider bearing step)
+    │          │
+    └──╮    ╭──┘  ← cap (rounded underside, torus arc profile)
+       │    │
+       │    │     ← ringshaft (narrow neck, spline profile)
+       ╰╮  ╭╯
+    ╭────╯  ╰────╮
+   ╭╯    ○ bore  ╰╮  ← ring (sphere slice, finger grip)
+    ╰────╮  ╭────╯
+         │  │
+         ╰──╯     ← stalk + pip (locating nub)
+```
 
 1. **Gear shaft** — long cylinder that fits into the gear mechanism
-2. **Shoulder** — flat disc stepping up from gear shaft
-3. **Cap** — wider disc with dramatic fillet on ring-shaft side
-4. **Ring shaft** — short narrow cylinder connecting cap to ring
-5. **Ring** — spherical shell finger grip (the widest feature)
-6. **Stalk** — barely perceptible tiny neck
-7. **Pip** — small decorative nub at the very top
+2. **Shoulder** — flat disc stepping out from gear shaft, provides bearing surface
+3. **Cap** — rounded underside of the shoulder, curves inward like a mushroom cap. Built as a torus arc of revolution that blends from the shoulder outer edge down to the ringshaft diameter.
+4. **Ringshaft** — narrow neck connecting cap to ring. Built as a smooth spline revolve that meets the cap tangentially at the top and the ring sphere tangentially at the bottom.
+5. **Ring** — spherical-shell finger grip, the widest feature. A sphere sliced by two slightly tapered planes, with a cylindrical bore for the string.
+6. **Stalk** — thin rod below the ring
+7. **Pip** — small locating nub at the very bottom, with filleted top and bottom edges
 
-## Construction Sequence
+## Construction (peghead_simple.py)
 
-### 1. Gear Shaft
+### 1. Upper body (gear shaft + shoulder + cap + boss) — single revolve
 
-A plain cylinder, 3.8mm diameter. Extends from the shoulder to Z=+10.4. In the real part this has threading/gearing, but the STEP model represents it as a smooth cylinder. This is the longest single feature.
+The gear shaft, shoulder, and cap are built as one revolved profile. The profile traces:
+- Boss nub at the very top (tiny centering feature)
+- Gear shaft cylinder wall downward
+- Step out to shoulder width
+- Shoulder cylinder wall downward
+- Short straight connecting shoulder edge to cap arc start
+- Torus arc curving inward and downward (the cap)
+- Straight line back to the Z axis
 
-### 2. Shoulder
+The cap's torus arc starts where the shoulder ends and sweeps from `cap_arc_start_deg` (30°) to 90°. The torus centre Z is derived so the arc begins exactly at the shoulder bottom — not a free parameter.
 
-A short cylinder, 7.0mm diameter, approximately 1mm tall. Steps up from the gear shaft diameter, providing a bearing surface.
+### 2. Ring — sphere → split → bore → fillet
 
-### 3. Cap
+A full sphere, sliced by two near-parallel planes (forming the ring disc), then bored through with a cylinder for the string. The cut planes have a slight taper (`ring_taper`) so the ring is marginally thicker on one side.
 
-A flat cylinder, 8.5mm diameter, 2mm tall. The face toward the shoulder is flat. The opposite face (toward the ring) has a dramatic fillet that blends the 8.5mm OD smoothly down to the ring shaft diameter (3.8mm), creating a flowing sculptural transition. This fillet corresponds to the torus face (major_r=2.52, minor_r=2.0) in the fingerprint.
+Outer edge fillets are applied after fusing with the ringshaft (step 5) so the fillet flows smoothly across the junction.
 
-Small r=0.3mm fillets on the cap's outer edges (torus faces at major_r=5.84, minor_r=0.3).
+### 3. Ringshaft — smooth spline revolve
 
-### 4. Ring Shaft
+A spline profile revolved around Z, then clipped by the ring cut planes. The spline passes through three points:
+1. Top: at `ringshaft_r`, entering vertically (tangent to cap bottom)
+2. Waypoint: at `ringshaft_r`, at the flare depth (controls where it starts curving outward)
+3. Bottom: at the sphere surface radius, entering tangent to the sphere
 
-A plain cylinder, 3.8mm diameter, 2.5mm long. Connects the cap to the ring. The cap's fillet flows into this shaft, and the shaft transitions into the ring bore.
+This gives a smooth, tangent-continuous transition from cap to ring with no sharp edges.
 
-### 5. Ring (the finger grip)
+### 4. Stalk + pip — single revolve
 
-Start with a solid sphere, 12.5mm diameter, centered on the axis.
+The stalk and pip are one revolved profile. The pip fillets are drawn directly as arcs in the 2D profile rather than using the OCCT fillet API. When the stalk radius equals the pip fillet tangent point (as it does at 0.75mm), the horizontal step is omitted and the stalk meets the fillet arc directly.
 
-Cut the sphere with two planes roughly perpendicular to Z, but slightly angled relative to each other so the ring tapers:
-- **Thin side** (pip end, more negative Z): 2.5mm tall
-- **Thick side** (ring shaft end, more positive Z): 3.2mm tall
+### 5. Assembly + fillets
 
-Bore a cylinder of 9.8mm diameter through the center (along Z), turning the solid disc into a ring. The radial wall thickness at the widest point of the sphere is (12.5 - 9.8) / 2 = 1.35mm.
+- Ring fused with ringshaft → outer edge fillets applied on this assembly
+- Fused with upper body and stalk+pip
+- Bore-plane inner edge fillets applied last on the full solid
 
-Fillet the sharp edges where the cut planes meet the spherical surface and the bore cylinder, using a 2.0mm radius. This creates the smooth, comfortable finger-grip profile (producing the BSpline surfaces seen in the STEP file).
+## Key Dimensions
 
-### 6. Stalk
-
-A tiny cylinder, 1.0mm diameter, less than 0.5mm long. Barely perceptible — just a neck connecting the ring face to the pip.
-
-### 7. Pip
-
-A small cylinder, 2.0mm OD, 1.3mm tall before filleting. Both ends are heavily filleted (r=0.3mm, torus faces at major_r=0.75, minor_r=0.3) making it appear almost — but not quite — spherical.
-
-## Key Dimensions Summary
-
-| Feature | Diameter | Height/Length | Approx Z range |
-|---------|----------|---------------|----------------|
-| Gear shaft | 3.8mm | ~9mm | +10.4 to ~+1 |
-| Shoulder | 7.0mm | ~1.0mm | ~+1 to ~0 |
-| Cap | 8.5mm | 2.0mm | ~0 to ~-2 |
-| Ring shaft | 3.8mm | 2.5mm | ~-2 to ~-4.5 |
-| Ring (sphere) | 12.5mm outer | 2.5–3.2mm (tapered) | ~-4.5 to ~-17 |
-| Ring bore | 9.8mm | — | — |
-| Ring wall (radial) | — | 1.35mm | — |
-| Stalk | 1.0mm | <0.5mm | ~-17 to ~-17.5 |
-| Pip | 2.0mm | 1.3mm | ~-17.5 to ~-19 |
+| Feature | Diameter | Length | Notes |
+|---------|----------|--------|-------|
+| Gear shaft | 3.8mm | 10.4mm | Smooth cylinder (real part has gearing) |
+| Shoulder | 7.0mm | 1.2mm | Bearing surface |
+| Cap | varies | ~1.0mm depth | Torus arc: flat_r=2.52, minor_r=2.0 |
+| Ringshaft | 3.56mm | ~4.0mm | Spline profile, flares to meet ring |
+| Ring (sphere) | 12.5mm outer | ~3.7mm thick | Slightly tapered |
+| Ring bore | 9.8mm | — | Offset 0.25mm below sphere centre |
+| Stalk | 1.5mm | ~0.2mm exposed | Mostly hidden inside ring |
+| Pip | 2.1mm | 1.2mm | Filleted top and bottom (r=0.3mm) |
 
 ## Fillets
 
-| Location | Radius | Fingerprint signature |
-|----------|--------|-----------------------|
-| Ring edges (cut plane to sphere/bore) | 2.0mm | BSpline faces |
-| Cap ring-side face (OD to ring shaft blend) | 2.0mm | Torus major=2.52, minor=2.0 |
-| Cap outer edges | 0.3mm | Torus major=5.84, minor=0.3 |
-| Pip ends | 0.3mm | Torus major=0.75, minor=0.3 |
+| Location | Radius | Notes |
+|----------|--------|-------|
+| Ring outer edges (sphere-plane) | 0.5mm | Applied on ring+ringshaft assembly |
+| Ring bore edges (bore-plane) | 0.5mm | Applied post-fuse on full solid |
+| Pip top and bottom | 0.3mm | Drawn as arcs in revolve profile |
+| Cap underside (torus arc) | 2.0mm | Built into the revolve profile |
 
 ## Bounding Box
 
-- X: -6.25 to +6.25 (12.5mm — sphere diameter)
-- Y: -4.25 to +4.25 (8.5mm — limited by bore through sphere)
-- Z: -19.03 to +10.4 (29.4mm total)
-
-## Fingerprint Validation
-
-The implementation must pass 43 geometric assertions in `test_peghead.py`, covering:
-- Volume: 375.64 mm³
-- Surface area: 568.40 mm²
-- Moments of inertia (sensitive to mass distribution)
-- 27 faces (6 BSpline, 7 Cylinder, 8 Plane, 1 Sphere, 5 Torus)
-- Cross-sectional areas at 20 Z positions
-- Radial profiles at 15 Z positions × 12 angles
+- X: ±6.25mm (12.5mm — ring sphere diameter)
+- Y: ±4.25mm (limited by bore through sphere)
+- Z: ~-19.1 to +10.4 (~29.5mm total)
