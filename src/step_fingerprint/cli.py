@@ -26,6 +26,10 @@ def main():
         help="Save fingerprint as JSON (for inspection or later use)",
     )
     parser.add_argument(
+        "--prompt",
+        help="Output prompt/guide file path (e.g. PROMPT.md)",
+    )
+    parser.add_argument(
         "--name", default=None,
         help="Human-readable part name (default: stem of STEP filename)",
     )
@@ -113,7 +117,18 @@ def main():
             radial_tol_mm=args.radial_tol,
         )
         print(f"  Test file generated: {args.output}")
-    elif not args.json:
+
+    if args.prompt:
+        from .generate import generate_prompt
+        generate_prompt(
+            fp,
+            output_path=args.prompt,
+            module_name=module_name,
+            axis=args.axis,
+        )
+        print(f"  Prompt file generated: {args.prompt}")
+
+    if not args.output and not args.json and not args.prompt:
         # No output specified — print JSON to stdout
         print(fp.to_json())
 

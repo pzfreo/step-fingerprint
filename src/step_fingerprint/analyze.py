@@ -27,6 +27,7 @@ from OCP.GProp import GProp_GProps
 from OCP.gp import gp_Dir, gp_Lin, gp_Pln, gp_Pnt, gp_Vec
 from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
+from OCP.TopTools import TopTools_HSequenceOfShape
 from OCP.TopoDS import TopoDS
 
 _SURFACE_NAMES = {
@@ -401,6 +402,167 @@ def radial_profile(
     return profiles
 
 
+# ── build quality ────────────────────────────────────────────────────
+
+
+def build_quality(shape: Part, step_path: str | None = None) -> dict:
+    """Analyze build quality metrics for the shape.
+
+    Returns solid count, free edge count, OCCT validity, and optionally
+    the STEP file size. These metrics help catch common CAD build errors:
+    - Multiple solids from failed booleans
+    - Free edges from open shells
+    - Invalid geometry from degenerate operations
+    - BSpline bloat inflating STEP file size
+    """
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds
+    from OCP.TopAbs import TopAbs_SOLID
+
+    # Count solids
+    solid_count = 0
+    exp = TopExp_Explorer(shape.wrapped, TopAbs_SOLID)
+    while exp.More():
+        solid_count += 1
+        exp.Next()
+
+    # Count free edges (edges belonging to only one face = open shell)
+    free_edges = TopTools_HSequenceOfShape()
+    closed_wires = TopTools_HSequenceOfShape()
+    ShapeAnalysis_FreeBounds.ConnectEdgesToWires_s(
+        _collect_free_edges(shape), 1e-4, False, free_edges
+    )
+    free_edge_count = free_edges.Length()
+
+    # OCCT validity check
+    analyzer = BRepCheck_Analyzer(shape.wrapped)
+    is_valid = analyzer.IsValid()
+
+    result = {
+        "solid_count": solid_count,
+        "free_edge_count": free_edge_count,
+        "is_valid": is_valid,
+    }
+
+    # STEP file size (if path provided)
+    if step_path:
+        import os
+        try:
+            result["step_file_bytes"] = os.path.getsize(step_path)
+        except OSError:
+            pass
+
+    return result
+
+
+def _collect_free_edges(shape: Part):
+    """Collect free boundary edges using ShapeAnalysis_FreeBounds."""
+    from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds
+    from OCP.TopTools import TopTools_HSequenceOfShape
+
+    fb = ShapeAnalysis_FreeBounds(shape.wrapped)
+    closed_wires = fb.GetClosedWires()
+    open_wires = fb.GetOpenWires()
+
+    edges = TopTools_HSequenceOfShape()
+    for wires in [open_wires]:
+        exp = TopExp_Explorer(wires, TopAbs_EDGE)
+        while exp.More():
+            edges.Append(exp.Current())
+            exp.Next()
+    return edges
+
+
+# ── part description ─────────────────────────────────────────────────
+
+
+def describe_part(
+    bb: dict,
+    va: dict,
+    topo: dict,
+    faces: list[dict],
+    cross_sections: list[dict],
+    axis: str = "Z",
+) -> dict:
+    """Auto-generate a structural description of the part from fingerprint data.
+
+    Returns a dict with:
+    - overall_size: bounding box dimensions
+    - cylinder_features: list of cylinder diameters found
+    - fillet_features: list of torus (fillet) radii found
+    - sphere_features: list of sphere radii
+    - bspline_count: number of complex BSpline faces
+    - symmetry: whether the part appears symmetric
+    - transitions: Z positions where cross-section area changes significantly
+    """
+    # Cylinder features (sorted by area, largest first)
+    cylinders = sorted(
+        [f for f in faces if f["type"] == "Cylinder"],
+        key=lambda f: -f["area"],
+    )
+    cylinder_features = []
+    seen_diams = set()
+    for c in cylinders:
+        d = round(c["diameter"], 2)
+        if d not in seen_diams:
+            cylinder_features.append({
+                "diameter": d,
+                "area": round(c["area"], 2),
+            })
+            seen_diams.add(d)
+
+    # Torus features (fillets)
+    tori = sorted(
+        [f for f in faces if f["type"] == "Torus"],
+        key=lambda f: -f["area"],
+    )
+    fillet_features = []
+    seen_fillets = set()
+    for t in tori:
+        key = (round(t["major_r"], 2), round(t["minor_r"], 2))
+        if key not in seen_fillets:
+            fillet_features.append({
+                "major_r": key[0],
+                "minor_r": key[1],
+                "area": round(t["area"], 2),
+            })
+            seen_fillets.add(key)
+
+    # Sphere features
+    spheres = [f for f in faces if f["type"] == "Sphere"]
+    sphere_features = [{"radius": round(s["radius"], 2), "area": round(s["area"], 2)}
+                       for s in spheres]
+
+    # BSpline count
+    bspline_count = sum(1 for f in faces if f["type"] == "BSpline")
+
+    # Detect significant cross-section transitions
+    transitions = []
+    for i in range(1, len(cross_sections)):
+        prev = cross_sections[i - 1]["area"]
+        curr = cross_sections[i]["area"]
+        if prev > 0.01 and curr > 0.01:
+            ratio = max(curr / prev, prev / curr)
+            if ratio > 1.5:
+                transitions.append({
+                    "position": cross_sections[i]["position"],
+                    "from_area": round(prev, 2),
+                    "to_area": round(curr, 2),
+                })
+
+    return {
+        "overall_size": bb["size"],
+        "volume": round(va["volume"], 2),
+        "surface_area": round(va["surface_area"], 2),
+        "face_count": topo["faces"],
+        "cylinder_features": cylinder_features,
+        "fillet_features": fillet_features,
+        "sphere_features": sphere_features,
+        "bspline_count": bspline_count,
+        "transitions": transitions,
+    }
+
+
 # ── full analysis ────────────────────────────────────────────────────
 
 
@@ -418,20 +580,26 @@ def analyze_step(
     """
     shape = load_step(path)
 
+    bb = bounding_box(shape)
+    va = volume_and_area(shape)
+    topo = topology_counts(shape)
+    faces = face_inventory(shape)
+    xs = cross_section_areas(shape, axis=axis, num_slices=num_cross_sections)
+
     result = {
         "file": str(path),
-        "bounding_box": bounding_box(shape),
-        "volume_and_area": volume_and_area(shape),
+        "bounding_box": bb,
+        "volume_and_area": va,
         "moments_of_inertia": moments_of_inertia(shape),
-        "topology": topology_counts(shape),
-        "face_inventory": face_inventory(shape),
-        "cross_sections": cross_section_areas(
-            shape, axis=axis, num_slices=num_cross_sections,
-        ),
+        "topology": topo,
+        "face_inventory": faces,
+        "cross_sections": xs,
         "radial_profile": radial_profile(
             shape, axis=axis, num_slices=num_radial_slices,
             num_angles=num_angles,
         ),
+        "build_quality": build_quality(shape, step_path=path),
+        "description": describe_part(bb, va, topo, faces, xs, axis=axis),
     }
 
     return result

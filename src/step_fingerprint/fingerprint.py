@@ -27,6 +27,8 @@ class StepFingerprint:
     face_inventory: list[dict]
     cross_sections: list[dict]
     radial_profile: list[dict]
+    build_quality: dict = field(default_factory=dict)
+    description: dict = field(default_factory=dict)
 
     @classmethod
     def from_step(

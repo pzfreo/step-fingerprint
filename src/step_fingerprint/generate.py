@@ -451,6 +451,254 @@ def generate_test_file(
     lines.append(f"            )")
     lines.append("")
 
+    # -- Build quality
+    bq = fingerprint.build_quality
+    if bq:
+        lines.append("")
+        lines.append(f"class TestBuildQuality:")
+        lines.append(f'    """Solid validity, watertight check, single body."""')
+        lines.append("")
+
+        # Additional imports needed for build quality tests
+        lines.append(f"    def test_single_solid(self, {fixture_name}):")
+        lines.append(f'        """Result must be a single solid (not split by failed booleans)."""')
+        lines.append(f"        from OCP.TopAbs import TopAbs_SOLID")
+        lines.append(f"        exp = TopExp_Explorer({fixture_name}.wrapped, TopAbs_SOLID)")
+        lines.append(f"        count = 0")
+        lines.append(f"        while exp.More():")
+        lines.append(f"            count += 1")
+        lines.append(f"            exp.Next()")
+        lines.append(f"        assert count == {bq.get('solid_count', 1)}, (")
+        lines.append(f'            f"Expected {bq.get("solid_count", 1)} solid(s), got {{count}}"')
+        lines.append(f"        )")
+        lines.append("")
+
+        lines.append(f"    def test_no_free_edges(self, {fixture_name}):")
+        lines.append(f'        """No free edges — the solid must be watertight."""')
+        lines.append(f"        from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds")
+        lines.append(f"        fb = ShapeAnalysis_FreeBounds({fixture_name}.wrapped)")
+        lines.append(f"        open_wires = fb.GetOpenWires()")
+        lines.append(f"        exp = TopExp_Explorer(open_wires, TopAbs_EDGE)")
+        lines.append(f"        free_count = 0")
+        lines.append(f"        while exp.More():")
+        lines.append(f"            free_count += 1")
+        lines.append(f"            exp.Next()")
+        lines.append(f"        assert free_count == 0, (")
+        lines.append(f'            f"Found {{free_count}} free edge(s) — solid is not watertight"')
+        lines.append(f"        )")
+        lines.append("")
+
+        lines.append(f"    def test_shape_valid(self, {fixture_name}):")
+        lines.append(f'        """OCCT validity check — no degenerate or corrupt geometry."""')
+        lines.append(f"        from OCP.BRepCheck import BRepCheck_Analyzer")
+        lines.append(f"        analyzer = BRepCheck_Analyzer({fixture_name}.wrapped)")
+        lines.append(f"        assert analyzer.IsValid(), \"BRepCheck_Analyzer reports invalid geometry\"")
+        lines.append("")
+
+        if "step_file_bytes" in bq:
+            ref_bytes = bq["step_file_bytes"]
+            max_bytes = ref_bytes * 4
+            lines.append(f"    def test_step_file_size(self, {fixture_name}, tmp_path):")
+            lines.append(f'        """STEP file size must not balloon (catches BSpline bloat)."""')
+            lines.append(f"        import os")
+            lines.append(f"        from OCP.STEPControl import STEPControl_Writer, STEPControl_ManifoldSolidBrep")
+            lines.append(f"        from OCP.Interface import Interface_Static")
+            lines.append(f"        out = os.path.join(str(tmp_path), \"test_export.step\")")
+            lines.append(f"        writer = STEPControl_Writer()")
+            lines.append(f'        Interface_Static.SetCVal_s("write.step.schema", "AP203")')
+            lines.append(f"        writer.Transfer({fixture_name}.wrapped, STEPControl_ManifoldSolidBrep)")
+            lines.append(f"        writer.Write(out)")
+            lines.append(f"        size = os.path.getsize(out)")
+            lines.append(f"        assert size < {max_bytes}, (")
+            lines.append(f'            f"STEP file {{size // 1024}}KB exceeds {max_bytes // 1024}KB limit '
+                         f'(ref was {ref_bytes // 1024}KB)"')
+            lines.append(f"        )")
+            lines.append("")
+
+    content = "\n".join(lines)
+
+    if output_path:
+        Path(output_path).write_text(content)
+
+    return content
+
+
+def generate_prompt(
+    fingerprint: "StepFingerprint",
+    output_path: Optional[str | Path] = None,
+    module_name: str = "my_part",
+    axis: str = "Z",
+) -> str:
+    """Generate a generic prompt for an AI to recreate the STEP geometry.
+
+    The prompt describes the part structure, key dimensions, build quality
+    rules, and how to use the test suite. It is derived entirely from the
+    fingerprint data — no manual description needed.
+    """
+    fp = fingerprint
+    va = fp.volume_and_area
+    bb = fp.bounding_box
+    desc = fp.description
+    bq = fp.build_quality
+
+    lines = []
+    lines.append(f"# Reverse-Engineer a STEP File into build123d")
+    lines.append("")
+    lines.append("## Goal")
+    lines.append("")
+    lines.append(f"Recreate the geometry in the reference STEP file as procedural "
+                 f"build123d Python code. The test suite in `test_{module_name}.py` "
+                 f"defines geometric assertions that your implementation must pass.")
+    lines.append("")
+
+    # ── Part overview ──
+    lines.append("## Part Overview")
+    lines.append("")
+    lines.append(f"- **Bounding box**: {bb['size'][0]:.1f} × {bb['size'][1]:.1f} × "
+                 f"{bb['size'][2]:.1f} mm")
+    lines.append(f"- **Volume**: {va['volume']:.1f} mm³")
+    lines.append(f"- **Surface area**: {va['surface_area']:.1f} mm²")
+    lines.append(f"- **Faces**: {desc.get('face_count', '?')} "
+                 f"({desc.get('bspline_count', 0)} BSpline / complex)")
+    lines.append(f"- **Primary axis**: {axis}")
+    lines.append("")
+
+    # ── Key dimensions ──
+    lines.append("## Key Dimensions (extracted from fingerprint)")
+    lines.append("")
+
+    if desc.get("cylinder_features"):
+        lines.append("### Cylindrical features")
+        lines.append("")
+        lines.append("| Diameter | Surface area | Likely feature |")
+        lines.append("|----------|-------------|----------------|")
+        for c in desc["cylinder_features"]:
+            lines.append(f"| {c['diameter']:.2f} mm | {c['area']:.1f} mm² | |")
+        lines.append("")
+
+    if desc.get("sphere_features"):
+        lines.append("### Spherical features")
+        lines.append("")
+        for s in desc["sphere_features"]:
+            lines.append(f"- Sphere radius {s['radius']:.2f} mm (area {s['area']:.1f} mm²)")
+        lines.append("")
+
+    if desc.get("fillet_features"):
+        lines.append("### Fillets (torus faces)")
+        lines.append("")
+        lines.append("| Major radius | Minor radius | Surface area |")
+        lines.append("|-------------|-------------|-------------|")
+        for f in desc["fillet_features"]:
+            lines.append(f"| {f['major_r']:.2f} mm | {f['minor_r']:.2f} mm | {f['area']:.1f} mm² |")
+        lines.append("")
+
+    if desc.get("bspline_count", 0) > 0:
+        lines.append(f"### Complex surfaces")
+        lines.append("")
+        lines.append(f"The part has {desc['bspline_count']} BSpline face(s). "
+                     f"These are sculpted/blended surfaces that cannot be represented "
+                     f"as simple primitives. They may result from fillets on complex "
+                     f"edge intersections (e.g. sphere-plane), lofts, or sweeps.")
+        lines.append("")
+
+    if desc.get("transitions"):
+        lines.append("### Profile transitions")
+        lines.append("")
+        lines.append(f"Significant cross-section area changes along the {axis} axis:")
+        lines.append("")
+        for t in desc["transitions"]:
+            lines.append(f"- At {axis}={t['position']:.1f}: "
+                         f"area {t['from_area']:.1f} → {t['to_area']:.1f} mm²")
+        lines.append("")
+
+    # ── Process ──
+    lines.append("## Process")
+    lines.append("")
+    lines.append("1. **Study the fingerprint data** in the test file. The reference "
+                 "data tells you everything about the shape:")
+    lines.append("   - `REF_FACE_INVENTORY` — every face type, area, and key "
+                 "dimensions (diameters, radii)")
+    lines.append("   - `REF_CROSS_SECTIONS` — cross-sectional area at multiple "
+                 f"{axis} positions")
+    lines.append("   - `REF_RADIAL_PROFILE` — outer radius at multiple positions × angles")
+    lines.append("   - `REF_VOLUME`, `REF_SURFACE_AREA`, `REF_BBOX_*` — global properties")
+    lines.append("   - `REF_INERTIA` — moments of inertia (very sensitive to mass distribution)")
+    lines.append("")
+    lines.append("2. **Create your implementation** in a new file that exports a "
+                 "function returning a build123d `Part`.")
+    lines.append("")
+    lines.append("3. **Create a conftest.py** with a fixture:")
+    lines.append("   ```python")
+    lines.append("   import pytest")
+    lines.append(f"   from my_implementation import create_{module_name}")
+    lines.append("")
+    lines.append("   @pytest.fixture")
+    lines.append("   def part_under_test():")
+    lines.append(f"       return create_{module_name}()")
+    lines.append("   ```")
+    lines.append("")
+    lines.append(f"4. **Run the tests**: `pytest test_{module_name}.py -v`")
+    lines.append("")
+    lines.append("5. **Iterate**. Read the failures, adjust your code, repeat.")
+    lines.append("")
+
+    # ── Reading the fingerprint ──
+    lines.append("## Tips for Reading the Fingerprint")
+    lines.append("")
+    lines.append("- **Cross-sections** show area vs position. Large jumps indicate "
+                 "transitions between features. Constant areas indicate cylindrical "
+                 "or prismatic sections.")
+    lines.append("- **Radial profiles** show radius vs angle at each position. "
+                 "Uniform radius = circular. Varying radius = sculpted/oval. "
+                 "`None` values mean the ray missed (bore or concavity).")
+    lines.append("- **Face inventory** lists every surface. BSpline faces are "
+                 "sculpted regions — you may need `fillet`, `sweep`, or `loft` "
+                 "operations, or accept that OCCT will approximate them as BSplines.")
+    lines.append("- **Cylinder diameters** give you key feature sizes directly.")
+    lines.append("- **Torus faces** are fillets/rounds — the minor radius is the "
+                 "fillet radius.")
+    lines.append("")
+
+    # ── Build quality rules ──
+    lines.append("## Build Quality Rules")
+    lines.append("")
+    lines.append("The test suite includes build quality checks. Follow these rules "
+                 "to avoid common failures:")
+    lines.append("")
+    lines.append("### After every boolean (fuse, subtract, split)")
+    lines.append("- Verify the result is a single solid. Boolean operations in "
+                 "build123d can return `Compound`, `ShapeList`, or multiple solids.")
+    lines.append("- Use a helper like `max(result.solids(), key=lambda s: s.volume)` "
+                 "to extract the largest solid if needed.")
+    lines.append("- Check for unexpected topology changes (face count, edge count).")
+    lines.append("")
+    lines.append("### After every fillet")
+    lines.append("- Verify the fillet actually applied (face count should increase).")
+    lines.append("- If OCCT produces BSpline surfaces where the reference has Torus "
+                 "faces, consider alternative approaches (torus subtract, arcs in "
+                 "revolve profiles).")
+    lines.append("- Fillets on complex edge intersections (sphere-plane, cone-plane) "
+                 "will almost always produce BSpline approximations.")
+    lines.append("")
+    lines.append("### STEP export")
+    lines.append("- Use AP203 with `STEPControl_ManifoldSolidBrep` for best "
+                 "compatibility.")
+    lines.append("- Run `ShapeFix_Shape` before export to catch minor geometry issues.")
+    if bq.get("step_file_bytes"):
+        ref_kb = bq["step_file_bytes"] // 1024
+        lines.append(f"- Reference STEP file is {ref_kb}KB. If your export is "
+                     f"more than 4× this size, BSpline bloat is likely the cause.")
+    lines.append("")
+
+    # ── Success criteria ──
+    lines.append("## What Success Looks Like")
+    lines.append("")
+    lines.append("All tests passing means your procedural code produces geometry "
+                 "that is manufacturing-equivalent to the reference STEP file. "
+                 "Minor surface representation differences are OK — the tolerances "
+                 "are calibrated to accept these while catching real geometry errors.")
+    lines.append("")
+
     content = "\n".join(lines)
 
     if output_path:
