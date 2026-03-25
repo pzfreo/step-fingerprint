@@ -232,77 +232,47 @@ def create_peghead():
                 return max(solids, key=lambda s: s.volume)
         return shape
 
-    # --- Ring outer fillets (×2): where sphere meets each tilted plane ---
-    # For each tilted plane, compute the torus that blends the
-    # sphere-plane intersection edge.
+    # --- Fillets: find target edges and apply OCCT fillet ---
+    fillet_edges = []
 
-    fillet_r = ring_outer_fillet_r  # minor radius of fillet torus
-    for plane in [plane1, plane2]:
-        # Distance from sphere center to tilted plane
-        plane_origin = bd.Vector(plane.origin)
-        plane_normal = bd.Vector(plane.z_dir)
-        sphere_center = bd.Vector(0, 0, sphere_cz)
-        d_to_plane = abs((sphere_center - plane_origin).dot(plane_normal))
-
-        # Major radius of the fillet torus (circle of tangency)
-        torus_major = math.sqrt(
-            (sphere_r - fillet_r) ** 2 - (d_to_plane - fillet_r) ** 2
-        )
-
-        # Fillet center: projection of sphere center onto plane,
-        # then offset fillet_r back toward sphere center
-        proj = sphere_center - plane_normal * (
-            (sphere_center - plane_origin).dot(plane_normal)
-        )
-        offset_dir = (sphere_center - proj)
-        offset_dir_len = math.sqrt(
-            offset_dir.X ** 2 + offset_dir.Y ** 2 + offset_dir.Z ** 2
-        )
-        offset_unit = offset_dir * (1.0 / offset_dir_len)
-        fillet_center = proj + offset_unit * fillet_r
-
-        # Build torus at origin (axis along Z), rotate to plane normal,
-        # translate to fillet center
-        torus = bd.Torus(
-            major_radius=torus_major,
-            minor_radius=fillet_r,
-        )
-
-        # Rotation from Z-axis to plane normal
-        z_axis = bd.Vector(0, 0, 1)
-        cross = z_axis.cross(plane_normal)
-        cross_len = math.sqrt(cross.X ** 2 + cross.Y ** 2 + cross.Z ** 2)
-        if cross_len > 1e-10:
-            rot_axis = bd.Axis(bd.Vector(0, 0, 0), cross * (1.0 / cross_len))
-            rot_angle = math.degrees(math.acos(
-                max(-1, min(1, z_axis.dot(plane_normal)))
-            ))
-            torus = torus.rotate(rot_axis, rot_angle)
-
-        torus = torus.translate(fillet_center)
-        solid = _extract_solid(solid - torus)
-
-    # --- Pip fillets (×2): top and bottom edges of pip cylinder ---
-    # Use OCCT chamfer_edges for pip since torus booleans fail on small features
-    pip_fillet_major = pip_r - pip_fillet_r  # 1.05 - 0.3 = 0.75
-
-    # Find pip edges (circular edges at pip_top_z and pip_bot_z)
-    pip_edges = []
+    # Ring outer edges: where sphere meets each tilted plane
     for edge in solid.edges():
         center = edge.center()
+        r = math.sqrt(center.X ** 2 + center.Y ** 2)
+        # Sphere-plane intersection edges are large-radius circles
+        # near the sphere center Z, with r close to sphere edge
+        if r > bore_r and r < sphere_r + 0.1:
+            for plane in [plane1, plane2]:
+                # Check if edge center lies on the plane
+                po = bd.Vector(plane.origin)
+                pn = bd.Vector(plane.z_dir)
+                ec = bd.Vector(center.X, center.Y, center.Z)
+                dist = abs((ec - po).dot(pn))
+                if dist < 0.01:
+                    fillet_edges.append((edge, ring_outer_fillet_r))
+                    break
+
+    # Pip edges: top and bottom circular edges of pip cylinder
+    for edge in solid.edges():
+        center = edge.center()
+        r = math.sqrt(center.X ** 2 + center.Y ** 2)
         for z_target in [pip_top_z, pip_bot_z]:
-            if abs(center.Z - z_target) < 0.01 and abs(
-                math.sqrt(center.X**2 + center.Y**2) - pip_r
-            ) < 0.1:
-                pip_edges.append(edge)
+            if abs(center.Z - z_target) < 0.01 and abs(r - pip_r) < 0.1:
+                fillet_edges.append((edge, pip_fillet_r))
                 break
 
-    if pip_edges:
+    # Apply fillets grouped by radius
+    from collections import defaultdict
+    by_radius = defaultdict(list)
+    for edge, radius in fillet_edges:
+        by_radius[radius].append(edge)
+
+    for radius, edges in by_radius.items():
         try:
-            solid = solid.fillet(pip_fillet_r, pip_edges)
+            solid = solid.fillet(radius, edges)
             solid = _extract_solid(solid)
-        except Exception:
-            pass  # Skip pip fillets if they fail
+        except Exception as e:
+            print(f"Warning: fillet r={radius} failed: {e}")
 
     return solid
 
