@@ -43,7 +43,7 @@ def create_peghead_simple():
     #    cap_flat_ratio = fraction of cap_r where the arc flattens out.
     #    cap_minor_r is derived so the arc spans from cap_r to cap_flat_r.
     cap_r = 4.25                     # cap outer radius
-    cap_flat_ratio = 2 / 3           # cap flattens at this fraction of cap_r
+    cap_flat_ratio = 3 / 4           # cap flattens at this fraction of cap_r
     cap_arc_start_deg = 30           # where cap arc meets shoulder bottom
     cap_arc_mid_deg = 60             # midpoint for three-point arc construction
     cap_flat_r = cap_r * cap_flat_ratio
