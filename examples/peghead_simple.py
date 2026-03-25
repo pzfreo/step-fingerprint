@@ -1,11 +1,12 @@
-"""Simplified peghead build using revolve + targeted fillets.
+"""Simplified peghead build using revolve profiles where possible.
 
 Improvements over the procedural version:
-- Upper body (shaft + shoulder + dome) built as a single revolve
-  instead of 4 separate fuse operations
-- Ring fillets applied on simple ring geometry before fusing
-  with the rest of the body (cleaner topology)
-- Fewer boolean operations overall
+- Upper body (shaft + shoulder + dome + boss) built as one revolve
+  instead of 4 separate primitives + fuses
+- Stalk + pip built as one revolve with pip fillets drawn directly
+  into the 2D profile (no OCCT fillet API for pip edges)
+- Ring still uses sphere → split → bore → fillet (OCCT always
+  produces BSpline for sphere-plane fillets regardless of approach)
 """
 
 import math
@@ -16,7 +17,7 @@ def create_peghead_simple():
     """Build the guitar tuning peg head."""
 
     # ═══════════════════════════════════════════════════════════
-    # Dimensions (identical to procedural version)
+    # Dimensions
     # ═══════════════════════════════════════════════════════════
 
     sphere_r = 6.25
@@ -62,7 +63,6 @@ def create_peghead_simple():
     shoulder_top_z = 0.0
     shoulder_bot_z = -shoulder_height
     shaft_top_z = shaft_height
-    dome_top_z = shoulder_bot_z
     dome_bot_z = torus_cz - torus_minor_r
     conn_shaft_top_z = dome_bot_z + conn_overlap
     conn_shaft_bot_z = (sphere_cz + sphere_r) - conn_ring_penetration
@@ -81,7 +81,7 @@ def create_peghead_simple():
     )
 
     # ═══════════════════════════════════════════════════════════
-    # 1. Upper body: single revolve (shaft + shoulder + dome)
+    # 1. Upper body: single revolve (shaft+shoulder+dome+boss)
     # ═══════════════════════════════════════════════════════════
 
     arc_start_r = torus_major_r + torus_minor_r * math.cos(
@@ -102,16 +102,12 @@ def create_peghead_simple():
     with bd.BuildPart() as upper_build:
         with bd.BuildSketch(bd.Plane.XZ) as sk:
             with bd.BuildLine() as ln:
-                # Boss
                 bd.Line((0, shaft_top_z + boss_h), (boss_r, shaft_top_z + boss_h))
                 bd.Line((boss_r, shaft_top_z + boss_h), (boss_r, shaft_top_z))
-                # Shaft
                 bd.Line((boss_r, shaft_top_z), (shaft_r, shaft_top_z))
                 bd.Line((shaft_r, shaft_top_z), (shaft_r, shoulder_top_z))
-                # Shoulder
                 bd.Line((shaft_r, shoulder_top_z), (shoulder_r, shoulder_top_z))
                 bd.Line((shoulder_r, shoulder_top_z), (shoulder_r, shoulder_bot_z))
-                # Dome: shoulder → torus arc → dome bottom
                 bd.Line((shoulder_r, shoulder_bot_z), (arc_start_r, arc_start_z))
                 bd.ThreePointArc(
                     (arc_start_r, arc_start_z),
@@ -119,7 +115,6 @@ def create_peghead_simple():
                     (arc_end_r, arc_end_z),
                 )
                 bd.Line((arc_end_r, arc_end_z), (0, arc_end_z))
-                # Close along axis
                 bd.Line((0, arc_end_z), (0, shaft_top_z + boss_h))
             bd.make_face()
         bd.revolve(axis=bd.Axis.Z)
@@ -129,7 +124,9 @@ def create_peghead_simple():
     # 2. Ring: sphere → split → bore → fillet on simple geometry
     # ═══════════════════════════════════════════════════════════
 
-    sphere = bd.Sphere(radius=sphere_r).translate(bd.Vector(0, 0, sphere_cz))
+    sphere = bd.Sphere(radius=sphere_r).translate(
+        bd.Vector(0, 0, sphere_cz)
+    )
     ring_disc = sphere.split(plane1).split(plane2)
 
     bore_cyl = bd.Cylinder(
@@ -142,7 +139,7 @@ def create_peghead_simple():
     )
     ring = (ring_disc - bore_cyl).solids()[0]
 
-    # Fillet ring outer edges (sphere-plane) on simple ring
+    # Fillet ring outer edges while ring is simple
     ring_outer_edges = []
     for edge in ring.edges():
         center = edge.center()
@@ -168,8 +165,8 @@ def create_peghead_simple():
             ring = ring.fillet(ring_outer_fillet_r, ring_outer_edges)
             if hasattr(ring, "solids") and ring.solids():
                 ring = ring.solids()[0]
-        except Exception as e:
-            print(f"Warning: ring outer fillet failed: {e}")
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════════════════════
     # 3. Connecting shaft: clipped by tilted planes
@@ -191,35 +188,48 @@ def create_peghead_simple():
     conn_shaft = conn_upper.fuse(conn_lower).split(plane1).split(plane2)
 
     # ═══════════════════════════════════════════════════════════
-    # 4. Stalk and pip
+    # 4. Stalk + pip: single revolve with pip fillets in profile
     # ═══════════════════════════════════════════════════════════
 
-    stalk = bd.Cylinder(
-        radius=stalk_r,
-        height=stalk_top_z - pip_top_z,
-        align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MAX),
-    ).translate(bd.Vector(0, 0, stalk_top_z))
+    f45 = pip_fillet_r * (1 - math.cos(math.radians(45)))
 
-    pip = bd.Cylinder(
-        radius=pip_r,
-        height=pip_height,
-        align=(bd.Align.CENTER, bd.Align.CENTER, bd.Align.MIN),
-    ).translate(bd.Vector(0, 0, pip_bot_z))
+    with bd.BuildPart() as pip_build:
+        with bd.BuildSketch(bd.Plane.XZ) as sk:
+            with bd.BuildLine() as ln:
+                # Stalk
+                bd.Line((0, stalk_top_z), (stalk_r, stalk_top_z))
+                bd.Line((stalk_r, stalk_top_z), (stalk_r, pip_top_z))
+                # Pip top: step out with fillet arc
+                bd.Line(
+                    (stalk_r, pip_top_z),
+                    (pip_r - pip_fillet_r, pip_top_z),
+                )
+                bd.ThreePointArc(
+                    (pip_r - pip_fillet_r, pip_top_z),
+                    (pip_r - f45, pip_top_z - f45),
+                    (pip_r, pip_top_z - pip_fillet_r),
+                )
+                # Pip side
+                bd.Line(
+                    (pip_r, pip_top_z - pip_fillet_r),
+                    (pip_r, pip_bot_z + pip_fillet_r),
+                )
+                # Pip bottom fillet arc
+                bd.ThreePointArc(
+                    (pip_r, pip_bot_z + pip_fillet_r),
+                    (pip_r - f45, pip_bot_z + f45),
+                    (pip_r - pip_fillet_r, pip_bot_z),
+                )
+                # Pip bottom back to axis
+                bd.Line((pip_r - pip_fillet_r, pip_bot_z), (0, pip_bot_z))
+                # Close along axis
+                bd.Line((0, pip_bot_z), (0, stalk_top_z))
+            bd.make_face()
+        bd.revolve(axis=bd.Axis.Z)
+    stalk_pip = pip_build.part
 
     # ═══════════════════════════════════════════════════════════
-    # 5. Fuse all: ring+conn first (coplanar planes), then rest
-    # ═══════════════════════════════════════════════════════════
-
-    ring_assembly = ring.fuse(conn_shaft)
-    solid = (
-        ring_assembly
-        .fuse(upper_body)
-        .fuse(stalk)
-        .fuse(pip)
-    )
-
-    # ═══════════════════════════════════════════════════════════
-    # 6. Post-fuse fillets: bore inner edges + pip edges
+    # 5. Fuse all parts
     # ═══════════════════════════════════════════════════════════
 
     def _extract_solid(shape):
@@ -227,7 +237,17 @@ def create_peghead_simple():
             return max(shape.solids(), key=lambda s: s.volume)
         return shape
 
-    # Bore-plane inner edges
+    ring_assembly = ring.fuse(conn_shaft)
+    solid = (
+        ring_assembly
+        .fuse(upper_body)
+        .fuse(stalk_pip)
+    )
+
+    # ═══════════════════════════════════════════════════════════
+    # 6. Bore-plane inner edge fillets (post-fuse)
+    # ═══════════════════════════════════════════════════════════
+
     bore_edges = []
     for edge in solid.edges():
         center = edge.center()
@@ -249,23 +269,6 @@ def create_peghead_simple():
             solid = _extract_solid(solid)
         except Exception as e:
             print(f"Warning: bore fillet failed: {e}")
-
-    # Pip edges
-    pip_edges = []
-    for edge in solid.edges():
-        center = edge.center()
-        r = math.sqrt(center.X ** 2 + center.Y ** 2)
-        for z_target in [pip_top_z, pip_bot_z]:
-            if abs(center.Z - z_target) < 0.01 and abs(r - pip_r) < 0.1:
-                pip_edges.append(edge)
-                break
-
-    if pip_edges:
-        try:
-            solid = solid.fillet(pip_fillet_r, pip_edges)
-            solid = _extract_solid(solid)
-        except Exception:
-            pass
 
     return solid
 
@@ -292,7 +295,6 @@ if __name__ == "__main__":
     writer.Write(out_path)
     print(f"Exported STEP to {out_path}")
 
-    # Show in OCP CAD Viewer if available
     try:
         from ocp_vscode import show
         show(solid)
