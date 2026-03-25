@@ -38,16 +38,20 @@ def create_peghead_simple():
     pip_height = 1.2             # pip cylinder height
 
     # -- Cap (rounded underside of shoulder, built as a torus arc) --
-    #    Revolved torus arc that curves from the cap outer edge inward.
-    #    cap_r = outer radius of the cap (widest point of the arc).
-    #    cap_flat_ratio = fraction of cap_r where the arc flattens out.
-    #    cap_minor_r is derived so the arc spans from cap_r to cap_flat_r.
-    cap_r = 4.25                     # cap outer radius
-    cap_flat_ratio = 3 / 4           # cap flattens at this fraction of cap_r
-    cap_arc_start_deg = 30           # where cap arc meets shoulder bottom
-    cap_arc_mid_deg = 60             # midpoint for three-point arc construction
-    cap_flat_r = cap_r * cap_flat_ratio
-    cap_minor_r = (cap_r - cap_flat_r) / math.cos(math.radians(cap_arc_start_deg))
+    #    Three design parameters define the cap shape. The torus arc
+    #    geometry (arc radius, start angle) is derived to fit them.
+    cap_r = 4.25                     # outer radius of the cap
+    cap_flat_r = cap_r * 3 / 4      # radius where the dome goes flat
+    cap_depth = 1.0                  # Z depth of the dome
+
+    # Derive torus arc geometry to fit cap_r, cap_flat_r, cap_depth
+    _dr = cap_r - cap_flat_r
+    _hyp = math.sqrt(cap_depth ** 2 + _dr ** 2)
+    cap_arc_start_deg = math.degrees(
+        math.asin(_dr / _hyp) - math.atan2(cap_depth, _dr)
+    )
+    cap_minor_r = cap_depth / (1 - math.sin(math.radians(cap_arc_start_deg)))
+    cap_arc_mid_deg = (cap_arc_start_deg + 90) / 2
 
     # -- Ring (sphere sliced by two near-parallel planes, bored out) --
     sphere_r = 6.25              # ring sphere radius
@@ -79,10 +83,9 @@ def create_peghead_simple():
     shoulder_bot_z = -shoulder_height              # = -1.2
     shaft_top_z = shaft_length                     # = 10.4
 
-    # Cap torus centre: constrained so arc starts exactly at shoulder bottom
-    cap_torus_cz = (shoulder_bot_z
-                    + cap_minor_r * math.sin(math.radians(cap_arc_start_deg)))
-    cap_bot_z = cap_torus_cz - cap_minor_r        # bottom of cap arc
+    # Cap Z positions
+    cap_bot_z = shoulder_bot_z - cap_depth         # bottom of cap dome
+    cap_torus_cz = cap_bot_z + cap_minor_r         # torus arc centre
 
     # Ring sphere
     sphere_cz = -ring_center_depth                 # sphere centre
