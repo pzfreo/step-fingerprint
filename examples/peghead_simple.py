@@ -139,34 +139,8 @@ def create_peghead_simple():
     )
     ring = (ring_disc - bore_cyl).solids()[0]
 
-    # Fillet ring outer edges while ring is simple
-    ring_outer_edges = []
-    for edge in ring.edges():
-        center = edge.center()
-        d_sphere = abs(
-            math.sqrt(
-                center.X ** 2
-                + center.Y ** 2
-                + (center.Z - sphere_cz) ** 2
-            )
-            - sphere_r
-        )
-        if d_sphere < 0.1:
-            for plane in [plane1, plane2]:
-                po = bd.Vector(plane.origin)
-                pn = bd.Vector(plane.z_dir)
-                ec = bd.Vector(center.X, center.Y, center.Z)
-                if abs((ec - po).dot(pn)) < 0.01:
-                    ring_outer_edges.append(edge)
-                    break
-
-    if ring_outer_edges:
-        try:
-            ring = ring.fillet(ring_outer_fillet_r, ring_outer_edges)
-            if hasattr(ring, "solids") and ring.solids():
-                ring = ring.solids()[0]
-        except Exception:
-            pass
+    # Ring outer fillets deferred to after connector fuse (section 5)
+    # so the fillet flows smoothly over the connector-sphere junction
 
     # ═══════════════════════════════════════════════════════════
     # 3. Connecting shaft: smooth spline revolve, clipped by planes
@@ -256,6 +230,39 @@ def create_peghead_simple():
         return shape
 
     ring_assembly = ring.fuse(conn_shaft)
+
+    # Fillet ring outer edges on ring+connector assembly so the fillet
+    # flows smoothly over the connector-sphere junction (no sharp point)
+    ring_outer_edges = []
+    for edge in ring_assembly.edges():
+        center = edge.center()
+        d_sphere = abs(
+            math.sqrt(
+                center.X ** 2
+                + center.Y ** 2
+                + (center.Z - sphere_cz) ** 2
+            )
+            - sphere_r
+        )
+        if d_sphere < 0.1:
+            for plane in [plane1, plane2]:
+                po = bd.Vector(plane.origin)
+                pn = bd.Vector(plane.z_dir)
+                ec = bd.Vector(center.X, center.Y, center.Z)
+                if abs((ec - po).dot(pn)) < 0.01:
+                    ring_outer_edges.append(edge)
+                    break
+
+    if ring_outer_edges:
+        try:
+            ring_assembly = ring_assembly.fillet(
+                ring_outer_fillet_r, ring_outer_edges
+            )
+            if hasattr(ring_assembly, "solids") and ring_assembly.solids():
+                ring_assembly = ring_assembly.solids()[0]
+        except Exception as e:
+            print(f"Warning: ring outer fillet failed: {e}")
+
     solid = (
         ring_assembly
         .fuse(upper_body)
