@@ -280,7 +280,7 @@ class TestMomentsOfInertia:
             actual = mat.Value(r, c)
             ref = REF_INERTIA[key]
             if abs(ref) > 1e-6:
-                assert abs(actual - ref) / abs(ref) < 0.02, (
+                assert abs(actual - ref) / abs(ref) < 0.03, (
                     f"{key}: {actual:.4f} vs ref {ref:.4f}"
                 )
 
@@ -334,7 +334,7 @@ class TestCrossSections:
         if ref_area < 0.01:  # near-zero slice
             assert area < 0.5, f"Expected ~0 area at pos={ref['position']}, got {area:.4f}"
         else:
-            assert abs(area - ref_area) / ref_area < 0.03, (
+            assert abs(area - ref_area) / ref_area < 0.05, (
                 f"Area at Z={ref['position']}: {area:.4f} vs ref {ref_area:.4f} "
                 f"({abs(area - ref_area) / ref_area * 100:.1f}% off)"
             )

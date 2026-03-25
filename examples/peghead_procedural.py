@@ -248,9 +248,40 @@ def create_peghead():
     solid = solid.fuse(boss)
 
     # ═══════════════════════════════════════════════════════════
-    # 8. Pip fillets
+    # 8. Fillets: ring inner (bore-plane) edges + pip edges
     # ═══════════════════════════════════════════════════════════
 
+    def _extract_solid(shape):
+        """Extract the largest Solid from a boolean result."""
+        if hasattr(shape, "solids") and shape.solids():
+            return max(shape.solids(), key=lambda s: s.volume)
+        return shape
+
+    # Ring inner edges: where bore cylinder meets each tilted plane
+    bore_edges = []
+    for edge in solid.edges():
+        center = edge.center()
+        # Bore is along Y axis at z=bore_cz — distance from bore surface
+        d_from_bore = abs(
+            math.sqrt(center.X ** 2 + (center.Z - bore_cz) ** 2) - bore_r
+        )
+        if d_from_bore < 0.1:
+            for plane in [plane1, plane2]:
+                po = bd.Vector(plane.origin)
+                pn = bd.Vector(plane.z_dir)
+                ec = bd.Vector(center.X, center.Y, center.Z)
+                if abs((ec - po).dot(pn)) < 0.05:
+                    bore_edges.append(edge)
+                    break
+
+    if bore_edges:
+        try:
+            solid = solid.fillet(ring_outer_fillet_r, bore_edges)
+            solid = _extract_solid(solid)
+        except Exception as e:
+            print(f"Warning: bore fillet failed: {e}")
+
+    # Pip edges: top and bottom circular edges of pip cylinder
     pip_edges = []
     for edge in solid.edges():
         center = edge.center()
@@ -263,8 +294,7 @@ def create_peghead():
     if pip_edges:
         try:
             solid = solid.fillet(pip_fillet_r, pip_edges)
-            if hasattr(solid, "solids") and solid.solids():
-                solid = solid.solids()[0]
+            solid = _extract_solid(solid)
         except Exception:
             pass
 
