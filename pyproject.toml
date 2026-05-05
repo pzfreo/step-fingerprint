@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "step-fingerprint"
-version = "0.1.0"
-description = "Generate geometric fingerprint tests from STEP files for reverse-engineering into build123d"
+name = "cad-fingerprint"
+version = "0.2.0"
+description = "Generate geometric fingerprint tests from STEP and STL files for reverse-engineering into build123d"
 requires-python = ">=3.10"
 dependencies = [
     "build123d>=0.7",
@@ -15,7 +15,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-step-fingerprint = "step_fingerprint.cli:main"
+cad-fingerprint = "cad_fingerprint.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

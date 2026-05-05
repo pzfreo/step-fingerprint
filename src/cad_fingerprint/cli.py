@@ -1,9 +1,9 @@
-"""CLI for step-fingerprint.
+"""CLI for cad-fingerprint.
 
 Usage:
-    step-fingerprint reference.step                    # print JSON fingerprint
-    step-fingerprint reference.step -o test_part.py    # generate pytest file
-    step-fingerprint reference.step --json fp.json     # save JSON fingerprint
+    cad-fingerprint reference.step                    # print JSON fingerprint
+    cad-fingerprint reference.stl  -o test_part.py    # generate pytest file
+    cad-fingerprint reference.step --json fp.json     # save JSON fingerprint
 """
 
 import argparse
@@ -13,10 +13,10 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate geometric fingerprint tests from STEP files",
-        prog="step-fingerprint",
+        description="Generate geometric fingerprint tests from STEP or STL files",
+        prog="cad-fingerprint",
     )
-    parser.add_argument("step_file", help="Path to the STEP file to fingerprint")
+    parser.add_argument("cad_file", help="Path to the STEP or STL file to fingerprint")
     parser.add_argument(
         "-o", "--output",
         help="Output pytest file path (e.g. test_my_part.py)",
@@ -31,7 +31,7 @@ def main():
     )
     parser.add_argument(
         "--name", default=None,
-        help="Human-readable part name (default: stem of STEP filename)",
+        help="Human-readable part name (default: stem of input filename)",
     )
     parser.add_argument(
         "--fixture", default="part_under_test",
@@ -72,22 +72,40 @@ def main():
 
     args = parser.parse_args()
 
-    step_path = Path(args.step_file)
-    if not step_path.exists():
-        print(f"Error: STEP file not found: {step_path}", file=sys.stderr)
+    cad_path = Path(args.cad_file)
+    if not cad_path.exists():
+        print(f"Error: file not found: {cad_path}", file=sys.stderr)
         sys.exit(1)
 
-    module_name = args.name or step_path.stem
+    suffix = cad_path.suffix.lower()
+    is_stl = suffix == ".stl"
+    is_step = suffix in (".step", ".stp")
+    if not is_stl and not is_step:
+        print(f"Error: unsupported format '{suffix}' (expected .step, .stp, or .stl)",
+              file=sys.stderr)
+        sys.exit(1)
 
-    print(f"Analyzing {step_path}...")
-    from .fingerprint import StepFingerprint
-    fp = StepFingerprint.from_step(
-        step_path,
-        axis=args.axis,
-        num_cross_sections=args.cross_sections,
-        num_radial_slices=args.radial_slices,
-        num_angles=args.angles,
-    )
+    module_name = args.name or cad_path.stem
+
+    print(f"Analyzing {cad_path}...")
+    from .fingerprint import CadFingerprint
+    if is_stl:
+        fp = CadFingerprint.from_stl(
+            cad_path,
+            axis=args.axis,
+            num_cross_sections=args.cross_sections,
+            num_radial_slices=args.radial_slices,
+            num_angles=args.angles,
+        )
+        print("  (STL mode: face inventory shows mesh stats only, no surface type classification)")
+    else:
+        fp = CadFingerprint.from_step(
+            cad_path,
+            axis=args.axis,
+            num_cross_sections=args.cross_sections,
+            num_radial_slices=args.radial_slices,
+            num_angles=args.angles,
+        )
 
     va = fp.volume_and_area
     bb = fp.bounding_box
@@ -129,7 +147,6 @@ def main():
         print(f"  Prompt file generated: {args.prompt}")
 
     if not args.output and not args.json and not args.prompt:
-        # No output specified — print JSON to stdout
         print(fp.to_json())
 
 
