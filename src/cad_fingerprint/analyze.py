@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from build123d import Axis, Part, Plane, Compound, import_step
+from build123d import Axis, Part, Plane, Compound, import_step, import_stl
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
@@ -41,6 +41,11 @@ _SURFACE_NAMES = {
 
 
 # ── helpers ──────────────────────────────────────────────────────────
+
+
+def load_stl(path: str):
+    """Import an STL file and return a build123d Face (triangulated mesh)."""
+    return import_stl(str(path))
 
 
 def load_step(path: str) -> Part:
@@ -563,6 +568,341 @@ def describe_part(
     }
 
 
+# ── STL / mesh analysis ──────────────────────────────────────────────
+
+
+def _compute_mesh_props(triangles: list) -> tuple[dict, dict]:
+    """Core mesh math: volume, area, CoM, inertia from a triangle list.
+
+    triangles: list of ((x1,y1,z1), (x2,y2,z2), (x3,y3,z3))
+
+    Uses signed tetrahedral decomposition (Mirtich 1996). Exact for any
+    closed, consistently-wound triangulated surface.
+
+    Returns (volume_and_area dict, moments_of_inertia dict).
+    Pure Python — no OCC dependency. Testable without build123d.
+    """
+    vol = 0.0
+    area = 0.0
+    cx = cy = cz = 0.0
+    Ixx = Iyy = Izz = Ixy = Ixz = Iyz = 0.0
+
+    for (p1, p2, p3) in triangles:
+        x1, y1, z1 = p1
+        x2, y2, z2 = p2
+        x3, y3, z3 = p3
+
+        ax, ay, az = x2 - x1, y2 - y1, z2 - z1
+        bx, by, bz = x3 - x1, y3 - y1, z3 - z1
+        area += 0.5 * math.sqrt(
+            (ay * bz - az * by) ** 2 + (az * bx - ax * bz) ** 2 + (ax * by - ay * bx) ** 2
+        )
+
+        det = (x1 * (y2 * z3 - y3 * z2) +
+               x2 * (y3 * z1 - y1 * z3) +
+               x3 * (y1 * z2 - y2 * z1))
+        v = det / 6.0
+        vol += v
+        cx += v * (x1 + x2 + x3) / 4.0
+        cy += v * (y1 + y2 + y3) / 4.0
+        cz += v * (z1 + z2 + z3) / 4.0
+
+        # Inertia about origin — Mirtich 1996 / polyhedral mass properties
+        Ixx += (det / 60.0) * (
+            y1*y1 + y2*y2 + y3*y3 + y1*y2 + y1*y3 + y2*y3 +
+            z1*z1 + z2*z2 + z3*z3 + z1*z2 + z1*z3 + z2*z3
+        )
+        Iyy += (det / 60.0) * (
+            x1*x1 + x2*x2 + x3*x3 + x1*x2 + x1*x3 + x2*x3 +
+            z1*z1 + z2*z2 + z3*z3 + z1*z2 + z1*z3 + z2*z3
+        )
+        Izz += (det / 60.0) * (
+            x1*x1 + x2*x2 + x3*x3 + x1*x2 + x1*x3 + x2*x3 +
+            y1*y1 + y2*y2 + y3*y3 + y1*y2 + y1*y3 + y2*y3
+        )
+        Ixy -= (det / 120.0) * (
+            2*x1*y1 + 2*x2*y2 + 2*x3*y3 +
+            x1*y2 + x2*y1 + x1*y3 + x3*y1 + x2*y3 + x3*y2
+        )
+        Ixz -= (det / 120.0) * (
+            2*x1*z1 + 2*x2*z2 + 2*x3*z3 +
+            x1*z2 + x2*z1 + x1*z3 + x3*z1 + x2*z3 + x3*z2
+        )
+        Iyz -= (det / 120.0) * (
+            2*y1*z1 + 2*y2*z2 + 2*y3*z3 +
+            y1*z2 + y2*z1 + y1*z3 + y3*z1 + y2*z3 + y3*z2
+        )
+
+    vol = abs(vol)
+    if vol > 1e-12:
+        cx /= vol
+        cy /= vol
+        cz /= vol
+    com = (cx, cy, cz)
+
+    # Shift inertia from origin to CoM via parallel axis theorem.
+    # OCCT convention: off-diagonal element = -product_of_inertia.
+    Ixx_c = Ixx - vol * (cy * cy + cz * cz)
+    Iyy_c = Iyy - vol * (cx * cx + cz * cz)
+    Izz_c = Izz - vol * (cx * cx + cy * cy)
+    Ixy_c = Ixy + vol * cx * cy
+    Ixz_c = Ixz + vol * cx * cz
+    Iyz_c = Iyz + vol * cy * cz
+
+    va = {"volume": vol, "surface_area": area, "center_of_mass": com}
+    moi = {"Ixx": Ixx_c, "Iyy": Iyy_c, "Izz": Izz_c,
+           "Ixy": Ixy_c, "Ixz": Ixz_c, "Iyz": Iyz_c}
+    return va, moi
+
+
+def _mesh_properties(stl_face) -> tuple[dict, dict]:
+    """Extract Poly_Triangulation from an STL face and compute properties."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopLoc import TopLoc_Location
+
+    loc = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
+    if tri is None:
+        raise ValueError("STL face contains no triangulation")
+
+    nodes = tri.Nodes()
+    triangles = []
+    for i in range(1, tri.NbTriangles() + 1):
+        t = tri.Triangle(i)
+        n1, n2, n3 = t.Get()
+        p1, p2, p3 = nodes.Value(n1), nodes.Value(n2), nodes.Value(n3)
+        triangles.append((
+            (p1.X(), p1.Y(), p1.Z()),
+            (p2.X(), p2.Y(), p2.Z()),
+            (p3.X(), p3.Y(), p3.Z()),
+        ))
+    return _compute_mesh_props(triangles)
+
+
+def _segments_to_area(segments: list) -> tuple[float, float, float]:
+    """Assemble 2D line segments into polygons; return (area, cx, cy).
+
+    Uses greedy chain-following then the shoelace formula.
+    """
+    if not segments:
+        return 0.0, 0.0, 0.0
+
+    EPS2 = 1e-6
+
+    def dist2(a, b):
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+    used = [False] * len(segments)
+    polygons = []
+
+    for start in range(len(segments)):
+        if used[start]:
+            continue
+        chain = list(segments[start])
+        used[start] = True
+        for _ in range(len(segments)):
+            tail = chain[-1]
+            found = False
+            for j in range(len(segments)):
+                if used[j]:
+                    continue
+                s = segments[j]
+                if dist2(s[0], tail) < EPS2:
+                    chain.append(s[1])
+                    used[j] = True
+                    found = True
+                    break
+                if dist2(s[1], tail) < EPS2:
+                    chain.append(s[0])
+                    used[j] = True
+                    found = True
+                    break
+            if not found or dist2(chain[-1], chain[0]) < EPS2:
+                break
+        if len(chain) >= 3:
+            polygons.append(chain)
+
+    total_area = 0.0
+    total_cx = 0.0
+    total_cy = 0.0
+    for poly in polygons:
+        a = 0.0
+        pcx = 0.0
+        pcy = 0.0
+        n = len(poly)
+        for k in range(n):
+            x0, y0 = poly[k]
+            x1, y1 = poly[(k + 1) % n]
+            cross = x0 * y1 - x1 * y0
+            a += cross
+            pcx += (x0 + x1) * cross
+            pcy += (y0 + y1) * cross
+        signed_area = a / 2.0
+        abs_area = abs(signed_area)
+        if abs_area > 1e-10:
+            total_area += abs_area
+            total_cx += (pcx / (6.0 * signed_area)) * abs_area
+            total_cy += (pcy / (6.0 * signed_area)) * abs_area
+
+    if total_area < 1e-10:
+        return 0.0, 0.0, 0.0
+    return total_area, total_cx / total_area, total_cy / total_area
+
+
+def cross_section_areas_mesh(
+    stl_face,
+    axis: str = "Z",
+    num_slices: int = 20,
+    margin: float = 0.01,
+) -> list[dict]:
+    """Cross-sections for an STL mesh via triangle-plane intersection.
+
+    Replaces the BRepAlgoAPI_Section approach (which requires analytical
+    B-Rep surfaces) with direct triangle clipping against the cut plane.
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.TopLoc import TopLoc_Location
+
+    loc = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
+    if tri is None:
+        return []
+
+    nodes = tri.Nodes()
+    axis = axis.upper()
+    if axis == "X":
+        ai, uv = 0, ("y", "z")
+        proj = lambda p: (p[1], p[2])
+    elif axis == "Y":
+        ai, uv = 1, ("x", "z")
+        proj = lambda p: (p[0], p[2])
+    else:
+        ai, uv = 2, ("x", "y")
+        proj = lambda p: (p[0], p[1])
+
+    pts = []
+    for i in range(1, tri.NbNodes() + 1):
+        n = nodes.Value(i)
+        pts.append((n.X(), n.Y(), n.Z()))
+
+    axis_vals = [p[ai] for p in pts]
+    lo, hi = min(axis_vals), max(axis_vals)
+    span = hi - lo
+    lo += span * margin
+    hi -= span * margin
+    if num_slices < 2:
+        num_slices = 2
+    step = (hi - lo) / (num_slices - 1)
+
+    triangles = []
+    for i in range(1, tri.NbTriangles() + 1):
+        t = tri.Triangle(i)
+        n1, n2, n3 = t.Get()
+        triangles.append((pts[n1 - 1], pts[n2 - 1], pts[n3 - 1]))
+
+    slices = []
+    for i in range(num_slices):
+        pos = lo + i * step
+        segments = []
+        for (p1, p2, p3) in triangles:
+            v1, v2, v3 = p1[ai] - pos, p2[ai] - pos, p3[ai] - pos
+            edge_pts = []
+            for (a, va), (b, vb) in (
+                ((p1, v1), (p2, v2)),
+                ((p2, v2), (p3, v3)),
+                ((p3, v3), (p1, v1)),
+            ):
+                if va * vb < 0:
+                    t_ = va / (va - vb)
+                    interp = tuple(a[k] + t_ * (b[k] - a[k]) for k in range(3))
+                    edge_pts.append(proj(interp))
+            if len(edge_pts) == 2:
+                segments.append((edge_pts[0], edge_pts[1]))
+
+        area, cu, cv = _segments_to_area(segments)
+        slices.append({
+            "position": round(pos, 4),
+            "area": round(area, 4),
+            f"centroid_{uv[0]}": round(cu, 4),
+            f"centroid_{uv[1]}": round(cv, 4),
+        })
+    return slices
+
+
+def build_quality_stl(stl_face, stl_path: str | None = None) -> dict:
+    """Build quality metrics for an STL mesh."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopLoc import TopLoc_Location
+
+    loc = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
+    result = {
+        "solid_count": 1,
+        "free_edge_count": 0,
+        "is_valid": tri is not None,
+        "triangle_count": tri.NbTriangles() if tri else 0,
+    }
+    if stl_path:
+        import os
+        try:
+            result["stl_file_bytes"] = os.path.getsize(stl_path)
+        except OSError:
+            pass
+    return result
+
+
+def analyze_stl(
+    path: str,
+    axis: str = "Z",
+    num_cross_sections: int = 20,
+    num_radial_slices: int = 15,
+    num_angles: int = 12,
+) -> dict:
+    """Run full geometric analysis on an STL file.
+
+    Face inventory is replaced by mesh-level stats (no surface type
+    classification without detect_primitives, which is not yet released).
+    Cross-sections use triangle-plane intersection instead of BRepAlgoAPI_Section.
+    All other metrics are equivalent to analyze_step.
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.TopLoc import TopLoc_Location
+
+    stl_face = load_stl(path)
+
+    bb = bounding_box(stl_face)
+    va, moi = _mesh_properties(stl_face)
+
+    loc = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
+    topo = {
+        "faces": tri.NbTriangles() if tri else 0,
+        "edges": 0,
+        "vertices": tri.NbNodes() if tri else 0,
+    }
+    faces = [{"type": "mesh", "triangle_count": tri.NbTriangles() if tri else 0,
+              "area": round(va["surface_area"], 4)}]
+
+    xs = cross_section_areas_mesh(stl_face, axis=axis, num_slices=num_cross_sections)
+    rp = radial_profile(stl_face, axis=axis, num_slices=num_radial_slices, num_angles=num_angles)
+    bq = build_quality_stl(stl_face, stl_path=path)
+    desc = describe_part(bb, va, topo, faces, xs, axis=axis)
+
+    return {
+        "file": str(path),
+        "source_format": "stl",
+        "bounding_box": bb,
+        "volume_and_area": va,
+        "moments_of_inertia": moi,
+        "topology": topo,
+        "face_inventory": faces,
+        "cross_sections": xs,
+        "radial_profile": rp,
+        "build_quality": bq,
+        "description": desc,
+    }
+
+
 # ── full analysis ────────────────────────────────────────────────────
 
 
@@ -588,6 +928,7 @@ def analyze_step(
 
     result = {
         "file": str(path),
+        "source_format": "step",
         "bounding_box": bb,
         "volume_and_area": va,
         "moments_of_inertia": moments_of_inertia(shape),

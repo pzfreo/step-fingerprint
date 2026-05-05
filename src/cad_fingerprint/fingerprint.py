@@ -1,4 +1,4 @@
-"""StepFingerprint — captures and stores a complete geometric fingerprint."""
+"""CadFingerprint — captures and stores a complete geometric fingerprint."""
 
 from __future__ import annotations
 
@@ -11,12 +11,11 @@ from . import analyze
 
 
 @dataclass
-class StepFingerprint:
-    """Complete geometric fingerprint of a STEP file.
+class CadFingerprint:
+    """Complete geometric fingerprint of a STEP or STL file.
 
-    This is the intermediate representation between analysis and test
-    generation. It can be serialized to JSON for inspection or loaded
-    back for comparison.
+    Intermediate representation between analysis and test generation.
+    Can be serialized to JSON for inspection or loaded back for comparison.
     """
 
     file: str
@@ -29,6 +28,31 @@ class StepFingerprint:
     radial_profile: list[dict]
     build_quality: dict = field(default_factory=dict)
     description: dict = field(default_factory=dict)
+    source_format: str = "step"
+
+    @classmethod
+    def from_stl(
+        cls,
+        path: str | Path,
+        axis: str = "Z",
+        num_cross_sections: int = 20,
+        num_radial_slices: int = 15,
+        num_angles: int = 12,
+    ) -> "CadFingerprint":
+        """Analyze an STL file and return its fingerprint.
+
+        Face inventory contains mesh-level stats only (no surface type
+        classification — detect_primitives is not yet in a released build123d).
+        Cross-sections and radial profile are fully functional.
+        """
+        data = analyze.analyze_stl(
+            str(path),
+            axis=axis,
+            num_cross_sections=num_cross_sections,
+            num_radial_slices=num_radial_slices,
+            num_angles=num_angles,
+        )
+        return cls(**data)
 
     @classmethod
     def from_step(
@@ -38,7 +62,7 @@ class StepFingerprint:
         num_cross_sections: int = 20,
         num_radial_slices: int = 15,
         num_angles: int = 12,
-    ) -> StepFingerprint:
+    ) -> "CadFingerprint":
         """Analyze a STEP file and return its fingerprint."""
         data = analyze.analyze_step(
             str(path),
@@ -58,7 +82,7 @@ class StepFingerprint:
         return text
 
     @classmethod
-    def from_json(cls, path: str | Path) -> StepFingerprint:
+    def from_json(cls, path: str | Path) -> "CadFingerprint":
         """Load a fingerprint from a JSON file."""
         data = json.loads(Path(path).read_text())
         return cls(**data)
