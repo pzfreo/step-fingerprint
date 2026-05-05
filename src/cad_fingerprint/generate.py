@@ -85,7 +85,6 @@ def generate_test_file(
     lines.append(f"        return my_build_function()")
     lines.append("")
     is_stl = getattr(fp, "source_format", "step") == "stl"
-    source_label = fp.file
 
     lines.append("Any procedural implementation that passes all tests is")
     fmt = "STL mesh" if is_stl else "STEP file"

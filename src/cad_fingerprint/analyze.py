@@ -571,35 +571,26 @@ def describe_part(
 # ── STL / mesh analysis ──────────────────────────────────────────────
 
 
-def _mesh_properties(stl_face) -> tuple[dict, dict]:
-    """Compute volume, surface area, CoM, and inertia from Poly_Triangulation.
+def _compute_mesh_props(triangles: list) -> tuple[dict, dict]:
+    """Core mesh math: volume, area, CoM, inertia from a triangle list.
 
-    Uses signed tetrahedral decomposition (Mirtich 1996) — exact for any
-    closed triangulated surface at mesh resolution.
+    triangles: list of ((x1,y1,z1), (x2,y2,z2), (x3,y3,z3))
+
+    Uses signed tetrahedral decomposition (Mirtich 1996). Exact for any
+    closed, consistently-wound triangulated surface.
 
     Returns (volume_and_area dict, moments_of_inertia dict).
+    Pure Python — no OCC dependency. Testable without build123d.
     """
-    from OCP.BRep import BRep_Tool
-    from OCP.TopLoc import TopLoc_Location
-
-    loc = TopLoc_Location()
-    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
-    if tri is None:
-        raise ValueError("STL face contains no triangulation")
-
-    nodes = tri.Nodes()
     vol = 0.0
     area = 0.0
     cx = cy = cz = 0.0
     Ixx = Iyy = Izz = Ixy = Ixz = Iyz = 0.0
 
-    for i in range(1, tri.NbTriangles() + 1):
-        t = tri.Triangle(i)
-        n1, n2, n3 = t.Get()
-        p1, p2, p3 = nodes.Value(n1), nodes.Value(n2), nodes.Value(n3)
-        x1, y1, z1 = p1.X(), p1.Y(), p1.Z()
-        x2, y2, z2 = p2.X(), p2.Y(), p2.Z()
-        x3, y3, z3 = p3.X(), p3.Y(), p3.Z()
+    for (p1, p2, p3) in triangles:
+        x1, y1, z1 = p1
+        x2, y2, z2 = p2
+        x3, y3, z3 = p3
 
         ax, ay, az = x2 - x1, y2 - y1, z2 - z1
         bx, by, bz = x3 - x1, y3 - y1, z3 - z1
@@ -616,7 +607,7 @@ def _mesh_properties(stl_face) -> tuple[dict, dict]:
         cy += v * (y1 + y2 + y3) / 4.0
         cz += v * (z1 + z2 + z3) / 4.0
 
-        # Inertia about origin (Mirtich 1996 / polyhedral mass properties)
+        # Inertia about origin — Mirtich 1996 / polyhedral mass properties
         Ixx += (det / 60.0) * (
             y1*y1 + y2*y2 + y3*y3 + y1*y2 + y1*y3 + y2*y3 +
             z1*z1 + z2*z2 + z3*z3 + z1*z2 + z1*z3 + z2*z3
@@ -650,7 +641,7 @@ def _mesh_properties(stl_face) -> tuple[dict, dict]:
     com = (cx, cy, cz)
 
     # Shift inertia from origin to CoM via parallel axis theorem.
-    # OCCT convention: off-diagonal = -product_of_inertia (negative).
+    # OCCT convention: off-diagonal element = -product_of_inertia.
     Ixx_c = Ixx - vol * (cy * cy + cz * cz)
     Iyy_c = Iyy - vol * (cx * cx + cz * cz)
     Izz_c = Izz - vol * (cx * cx + cy * cy)
@@ -662,6 +653,30 @@ def _mesh_properties(stl_face) -> tuple[dict, dict]:
     moi = {"Ixx": Ixx_c, "Iyy": Iyy_c, "Izz": Izz_c,
            "Ixy": Ixy_c, "Ixz": Ixz_c, "Iyz": Iyz_c}
     return va, moi
+
+
+def _mesh_properties(stl_face) -> tuple[dict, dict]:
+    """Extract Poly_Triangulation from an STL face and compute properties."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopLoc import TopLoc_Location
+
+    loc = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
+    if tri is None:
+        raise ValueError("STL face contains no triangulation")
+
+    nodes = tri.Nodes()
+    triangles = []
+    for i in range(1, tri.NbTriangles() + 1):
+        t = tri.Triangle(i)
+        n1, n2, n3 = t.Get()
+        p1, p2, p3 = nodes.Value(n1), nodes.Value(n2), nodes.Value(n3)
+        triangles.append((
+            (p1.X(), p1.Y(), p1.Z()),
+            (p2.X(), p2.Y(), p2.Z()),
+            (p3.X(), p3.Y(), p3.Z()),
+        ))
+    return _compute_mesh_props(triangles)
 
 
 def _segments_to_area(segments: list) -> tuple[float, float, float]:
