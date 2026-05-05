@@ -15,10 +15,16 @@ from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
 from OCP.BRepGProp import BRepGProp
+from OCP.BRepAdaptor import BRepAdaptor_Curve
+from OCP.GCPnts import GCPnts_AbscissaPoint
 from OCP.GeomAbs import (
+    GeomAbs_BSplineCurve,
     GeomAbs_BSplineSurface,
+    GeomAbs_Circle,
     GeomAbs_Cone,
     GeomAbs_Cylinder,
+    GeomAbs_Ellipse,
+    GeomAbs_Line,
     GeomAbs_Plane,
     GeomAbs_Sphere,
     GeomAbs_Torus,
@@ -181,6 +187,46 @@ def face_inventory(shape: Part) -> list[dict]:
     return faces
 
 
+# ── edge inventory ────────────────────────────────────────────────────
+
+_CURVE_NAMES = {
+    GeomAbs_Line: "Line",
+    GeomAbs_Circle: "Circle",
+    GeomAbs_Ellipse: "Ellipse",
+    GeomAbs_BSplineCurve: "BSpline",
+}
+
+
+def edge_inventory(shape: Part) -> list[dict]:
+    """Classify every edge in the shape by curve type and extract parameters.
+
+    Returns a sorted list of dicts, each with:
+      - type: "Line", "Circle", "Ellipse", "BSpline", or "Other(N)"
+      - length: edge length in mm
+      - radius: (Circle only) circle radius in mm
+
+    Sorted by type name, then descending length (matching face_inventory).
+    """
+    explorer = TopExp_Explorer(shape.wrapped, TopAbs_EDGE)
+    edges = []
+    while explorer.More():
+        edge = TopoDS.Edge_s(explorer.Current())
+        adaptor = BRepAdaptor_Curve(edge)
+        ctype = adaptor.GetType()
+        type_name = _CURVE_NAMES.get(ctype, f"Other({int(ctype)})")
+        length = GCPnts_AbscissaPoint.Length_s(adaptor)
+        info = {"type": type_name, "length": round(length, 4)}
+        if ctype == GeomAbs_Circle:
+            info["radius"] = round(adaptor.Circle().Radius(), 4)
+        elif ctype == GeomAbs_Ellipse:
+            info["major_r"] = round(adaptor.Ellipse().MajorRadius(), 4)
+            info["minor_r"] = round(adaptor.Ellipse().MinorRadius(), 4)
+        edges.append(info)
+        explorer.Next()
+    edges.sort(key=lambda e: (e["type"], -e["length"]))
+    return edges
+
+
 # ── cross-sections ───────────────────────────────────────────────────
 
 
@@ -283,6 +329,14 @@ def cross_section_areas(
         total_area = 0.0
         total_cu = 0.0
         total_cv = 0.0
+        total_Iuu = 0.0
+        total_Ivv = 0.0
+
+        # Indices into the 3x3 inertia matrix for the in-plane axes
+        # (1-indexed for gp_Mat): X=1, Y=2, Z=3
+        _axis_idx = {"X": 1, "Y": 2, "Z": 3}
+        u_idx = _axis_idx[uv[0]]
+        v_idx = _axis_idx[uv[1]]
 
         for w_idx in range(1, wires_seq.Length() + 1):
             wire = TopoDS.Wire_s(wires_seq.Value(w_idx))
@@ -298,6 +352,10 @@ def cross_section_areas(
                     total_area += a
                     total_cu += u * a
                     total_cv += v * a
+                    # 2D shape moments (about origin — summing is correct)
+                    mat = face_props.MatrixOfInertia()
+                    total_Iuu += mat.Value(u_idx, u_idx)
+                    total_Ivv += mat.Value(v_idx, v_idx)
             except Exception:
                 continue
 
@@ -309,6 +367,8 @@ def cross_section_areas(
             "area": round(total_area, 4),
             f"centroid_{uv[0].lower()}": round(cu, 4),
             f"centroid_{uv[1].lower()}": round(cv, 4),
+            f"I{uv[0].lower()}{uv[0].lower()}_2d": round(total_Iuu, 4),
+            f"I{uv[1].lower()}{uv[1].lower()}_2d": round(total_Ivv, 4),
         })
 
     return slices
@@ -924,6 +984,7 @@ def analyze_step(
     va = volume_and_area(shape)
     topo = topology_counts(shape)
     faces = face_inventory(shape)
+    edges = edge_inventory(shape)
     xs = cross_section_areas(shape, axis=axis, num_slices=num_cross_sections)
 
     result = {
@@ -934,6 +995,7 @@ def analyze_step(
         "moments_of_inertia": moments_of_inertia(shape),
         "topology": topo,
         "face_inventory": faces,
+        "edge_inventory": edges,
         "cross_sections": xs,
         "radial_profile": radial_profile(
             shape, axis=axis, num_slices=num_radial_slices,

@@ -35,6 +35,7 @@ def generate_test_file(
     inertia_tol_pct: float = 2.0,
     cross_section_area_tol_pct: float = 3.0,
     cross_section_centroid_tol_mm: float = 0.2,
+    cross_section_moment_tol_pct: float = 5.0,
     radial_tol_mm: float = 0.15,
     face_area_tol_pct: float = 5.0,
 ) -> str:
@@ -103,13 +104,15 @@ def generate_test_file(
     lines.append("import pytest")
     lines.append("")
     lines.append("from build123d import Part")
-    lines.append("from OCP.BRepAdaptor import BRepAdaptor_Surface")
+    lines.append("from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface")
     lines.append("from OCP.BRepAlgoAPI import BRepAlgoAPI_Section")
     lines.append("from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace")
     lines.append("from OCP.BRepGProp import BRepGProp")
+    lines.append("from OCP.GCPnts import GCPnts_AbscissaPoint")
     lines.append("from OCP.GeomAbs import (")
-    lines.append("    GeomAbs_BSplineSurface, GeomAbs_Cone, GeomAbs_Cylinder,")
-    lines.append("    GeomAbs_Plane, GeomAbs_Sphere, GeomAbs_Torus,")
+    lines.append("    GeomAbs_BSplineCurve, GeomAbs_BSplineSurface, GeomAbs_Circle,")
+    lines.append("    GeomAbs_Cone, GeomAbs_Cylinder, GeomAbs_Ellipse,")
+    lines.append("    GeomAbs_Line, GeomAbs_Plane, GeomAbs_Sphere, GeomAbs_Torus,")
     lines.append(")")
     lines.append("from OCP.GProp import GProp_GProps")
     lines.append("from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector")
@@ -165,14 +168,28 @@ def generate_test_file(
         lines.append("]")
         lines.append("")
 
+    # Edge inventory
+    lines.append("REF_EDGE_INVENTORY = [")
+    for e in fp.edge_inventory:
+        parts = [f'    {{"type": "{e["type"]}", "length": {_fmt_float(e["length"])}']
+        if "radius" in e:
+            parts.append(f', "radius": {_fmt_float(e["radius"])}')
+        if "major_r" in e:
+            parts.append(f', "major_r": {_fmt_float(e["major_r"])}')
+            parts.append(f', "minor_r": {_fmt_float(e["minor_r"])}')
+        parts.append("},")
+        lines.append("".join(parts))
+    lines.append("]")
+    lines.append("")
+
     # Cross-sections
     lines.append("REF_CROSS_SECTIONS = [")
     for cs in fp.cross_sections:
         parts = [f'    {{"position": {_fmt_float(cs["position"])}, '
                  f'"area": {_fmt_float(cs["area"])}']
-        # Add centroid keys dynamically
+        # Add centroid and 2D moment keys dynamically
         for k, v in cs.items():
-            if k.startswith("centroid_"):
+            if k.startswith("centroid_") or k.endswith("_2d"):
                 parts.append(f', "{k}": {_fmt_float(v)}')
         parts.append("},")
         lines.append("".join(parts))
@@ -235,14 +252,46 @@ def generate_test_file(
         return faces
 
 
-    def _cross_section_area(shape, axis_pos, plane_maker):
+    _CURVE_NAMES = {
+        GeomAbs_Line: "Line",
+        GeomAbs_Circle: "Circle",
+        GeomAbs_Ellipse: "Ellipse",
+        GeomAbs_BSplineCurve: "BSpline",
+    }
+
+
+    def _get_edge_inventory(shape):
+        explorer = TopExp_Explorer(shape.wrapped, TopAbs_EDGE)
+        edges = []
+        while explorer.More():
+            edge = TopoDS.Edge_s(explorer.Current())
+            adaptor = BRepAdaptor_Curve(edge)
+            ctype = adaptor.GetType()
+            type_name = _CURVE_NAMES.get(ctype, f"Other({int(ctype)})")
+            length = GCPnts_AbscissaPoint.Length_s(adaptor)
+            info = {"type": type_name, "length": length}
+            if ctype == GeomAbs_Circle:
+                info["radius"] = adaptor.Circle().Radius()
+            edges.append(info)
+            explorer.Next()
+        edges.sort(key=lambda e: (e["type"], -e["length"]))
+        return edges
+
+
+    def _cross_section_props(shape, axis_pos, plane_maker, uv_axes):
+        # Return area, centroid, and 2D shape moments for a cross-section.
+        _axis_idx = {"X": 1, "Y": 2, "Z": 3}
+        u_idx = _axis_idx[uv_axes[0]]
+        v_idx = _axis_idx[uv_axes[1]]
+        zero = {"area": 0.0, "centroid_u": 0.0, "centroid_v": 0.0,
+                "Iuu_2d": 0.0, "Ivv_2d": 0.0}
         plane = plane_maker(axis_pos)
         section = BRepAlgoAPI_Section(shape.wrapped, plane, False)
         section.ComputePCurveOn1(True)
         section.Approximation(True)
         section.Build()
         if not section.IsDone():
-            return 0.0
+            return zero
 
         result_shape = section.Shape()
         edges_seq = TopTools_HSequenceOfShape()
@@ -252,23 +301,40 @@ def generate_test_file(
             edges_seq.Append(edge_exp.Current())
             edge_exp.Next()
         if edges_seq.Length() == 0:
-            return 0.0
+            return zero
 
         ShapeAnalysis_FreeBounds.ConnectEdgesToWires_s(
             edges_seq, 1e-4, False, wires_seq
         )
         total_area = 0.0
+        total_cu = 0.0
+        total_cv = 0.0
+        total_Iuu = 0.0
+        total_Ivv = 0.0
         for w_idx in range(1, wires_seq.Length() + 1):
             wire = TopoDS.Wire_s(wires_seq.Value(w_idx))
             try:
                 face_maker = BRepBuilderAPI_MakeFace(plane, wire, True)
                 if face_maker.IsDone():
+                    face_shape = face_maker.Face()
                     face_props = GProp_GProps()
-                    BRepGProp.SurfaceProperties_s(face_maker.Face(), face_props)
-                    total_area += abs(face_props.Mass())
+                    BRepGProp.SurfaceProperties_s(face_shape, face_props)
+                    a = abs(face_props.Mass())
+                    com = face_props.CentreOfMass()
+                    u = getattr(com, uv_axes[0])()
+                    v = getattr(com, uv_axes[1])()
+                    total_area += a
+                    total_cu += u * a
+                    total_cv += v * a
+                    mat = face_props.MatrixOfInertia()
+                    total_Iuu += mat.Value(u_idx, u_idx)
+                    total_Ivv += mat.Value(v_idx, v_idx)
             except Exception:
                 continue
-        return total_area
+        cu = total_cu / total_area if total_area > 1e-9 else 0.0
+        cv = total_cv / total_area if total_area > 1e-9 else 0.0
+        return {"area": total_area, "centroid_u": cu, "centroid_v": cv,
+                "Iuu_2d": total_Iuu, "Ivv_2d": total_Ivv}
 
 
     def _radial_distance(shape, origin, direction, max_r=20.0):
@@ -300,9 +366,11 @@ def generate_test_file(
     lines.append(f"        vol_props = GProp_GProps()")
     lines.append(f"        BRepGProp.VolumeProperties_s({fixture_name}.wrapped, vol_props)")
     lines.append(f"        vol = vol_props.Mass()")
-    lines.append(f"        assert abs(vol - REF_VOLUME) / REF_VOLUME < {volume_tol_pct / 100}, (")
-    lines.append(f'            f"Volume {{vol:.4f}} differs from ref {{REF_VOLUME}} '
-                 f'by {{abs(vol - REF_VOLUME) / REF_VOLUME * 100:.1f}}%"')
+    lines.append(f"        pct = abs(vol - REF_VOLUME) / REF_VOLUME * 100")
+    lines.append(f"        direction = 'larger' if vol > REF_VOLUME else 'smaller'")
+    lines.append(f"        assert pct / 100 < {volume_tol_pct / 100}, (")
+    lines.append(f'            f"Volume {{vol:.4f}} is {{direction}} than ref {{REF_VOLUME}} '
+                 f'by {{abs(vol - REF_VOLUME):.2f}} mm³ ({{pct:.1f}}%) — adjust overall dimensions"')
     lines.append(f"        )")
     lines.append("")
 
@@ -310,8 +378,11 @@ def generate_test_file(
     lines.append(f"        props = GProp_GProps()")
     lines.append(f"        BRepGProp.SurfaceProperties_s({fixture_name}.wrapped, props)")
     lines.append(f"        area = props.Mass()")
-    lines.append(f"        assert abs(area - REF_SURFACE_AREA) / REF_SURFACE_AREA < {area_tol_pct / 100}, (")
-    lines.append(f'            f"Surface area {{area:.4f}} differs from ref {{REF_SURFACE_AREA}}"')
+    lines.append(f"        pct = abs(area - REF_SURFACE_AREA) / REF_SURFACE_AREA * 100")
+    lines.append(f"        direction = 'larger' if area > REF_SURFACE_AREA else 'smaller'")
+    lines.append(f"        assert pct / 100 < {area_tol_pct / 100}, (")
+    lines.append(f'            f"Surface area {{area:.4f}} is {{direction}} than ref {{REF_SURFACE_AREA}} '
+                 f'({{pct:.1f}}% off) — check feature dimensions"')
     lines.append(f"        )")
     lines.append("")
 
@@ -349,9 +420,23 @@ def generate_test_file(
     lines.append(f"            actual = mat.Value(r, c)")
     lines.append(f"            ref = REF_INERTIA[key]")
     lines.append(f"            if abs(ref) > 1e-6:")
-    lines.append(f"                assert abs(actual - ref) / abs(ref) < {inertia_tol_pct / 100}, (")
-    lines.append(f'                    f"{{key}}: {{actual:.4f}} vs ref {{ref:.4f}}"')
+    lines.append(f"                pct = abs(actual - ref) / abs(ref) * 100")
+    lines.append(f"                assert pct / 100 < {inertia_tol_pct / 100}, (")
+    lines.append(f'                    f"{{key}}: {{actual:.4f}} vs ref {{ref:.4f}} ({{pct:.1f}}% off) — mass distribution differs"')
     lines.append(f"                )")
+    lines.append("")
+
+    lines.append(f"    def test_off_diagonal_moments(self, {fixture_name}):")
+    lines.append(f"        props = GProp_GProps()")
+    lines.append(f"        BRepGProp.VolumeProperties_s({fixture_name}.wrapped, props)")
+    lines.append(f"        mat = props.MatrixOfInertia()")
+    lines.append(f"        for key, (r, c) in [(\"Ixy\", (1,2)), (\"Ixz\", (1,3)), (\"Iyz\", (2,3))]:")
+    lines.append(f"            actual = mat.Value(r, c)")
+    lines.append(f"            ref = REF_INERTIA[key]")
+    lines.append(f"            tol = max(abs(ref) * {inertia_tol_pct / 100}, 1.0)")
+    lines.append(f"            assert abs(actual - ref) < tol, (")
+    lines.append(f'                f"{{key}}: {{actual:.4f}} vs ref {{ref:.4f}} — part may be rotated or asymmetric"')
+    lines.append(f"            )")
     lines.append("")
 
     # -- Face inventory (STEP only — STL has no analytical surface types)
@@ -362,8 +447,10 @@ def generate_test_file(
         lines.append("")
         lines.append(f"    def test_face_count(self, {fixture_name}):")
         lines.append(f"        faces = _get_face_inventory({fixture_name})")
-        lines.append(f"        assert abs(len(faces) - REF_FACE_COUNT) <= 3, (")
-        lines.append(f'            f"Face count {{len(faces)}} vs ref {{REF_FACE_COUNT}}"')
+        lines.append(f"        diff = len(faces) - REF_FACE_COUNT")
+        lines.append(f"        label = 'extra' if diff > 0 else 'missing'")
+        lines.append(f"        assert abs(diff) <= 3, (")
+        lines.append(f'            f"Face count {{len(faces)}} vs ref {{REF_FACE_COUNT}} ({{label}} {{abs(diff)}}) — check boolean operations and fillets"')
         lines.append(f"        )")
         lines.append("")
 
@@ -376,8 +463,9 @@ def generate_test_file(
         lines.append(f"        for f in REF_FACE_INVENTORY:")
         lines.append(f'            ref[f["type"]] = ref.get(f["type"], 0) + 1')
         lines.append(f"        for ftype, count in ref.items():")
-        lines.append(f"            assert abs(actual.get(ftype, 0) - count) <= 2, (")
-        lines.append(f'                f"{{ftype}} count: {{actual.get(ftype, 0)}} vs ref {{count}}"')
+        lines.append(f"            actual_count = actual.get(ftype, 0)")
+        lines.append(f"            assert abs(actual_count - count) <= 2, (")
+        lines.append(f'                f"{{ftype}} count: {{actual_count}} vs ref {{count}} — check boolean operations and fillets"')
         lines.append(f"            )")
         lines.append("")
 
@@ -392,34 +480,122 @@ def generate_test_file(
         lines.append(f"            )")
         lines.append("")
 
+    # -- Edge inventory
+    if fp.edge_inventory:
+        lines.append("")
+        lines.append(f"class TestEdgeInventory:")
+        lines.append(f'    """Edge types, counts, and key dimensions."""')
+        lines.append("")
+
+        lines.append(f"    def test_edge_type_distribution(self, {fixture_name}):")
+        lines.append(f"        edges = _get_edge_inventory({fixture_name})")
+        lines.append(f"        actual = {{}}")
+        lines.append(f"        for e in edges:")
+        lines.append(f'            actual[e["type"]] = actual.get(e["type"], 0) + 1')
+        lines.append(f"        ref = {{}}")
+        lines.append(f"        for e in REF_EDGE_INVENTORY:")
+        lines.append(f'            ref[e["type"]] = ref.get(e["type"], 0) + 1')
+        lines.append(f"        for etype, count in ref.items():")
+        lines.append(f"            actual_count = actual.get(etype, 0)")
+        lines.append(f"            assert abs(actual_count - count) <= max(2, count // 5), (")
+        lines.append(f'                f"{{etype}} edge count: {{actual_count}} vs ref {{count}}"')
+        lines.append(f"            )")
+        lines.append("")
+
+        lines.append(f"    def test_circle_edge_radii(self, {fixture_name}):")
+        lines.append(f'        """Every reference circle-edge radius should appear."""')
+        lines.append(f"        edges = _get_edge_inventory({fixture_name})")
+        lines.append(f'        actual_radii = sorted(e["radius"] for e in edges if "radius" in e)')
+        lines.append(f'        ref_radii = sorted(e["radius"] for e in REF_EDGE_INVENTORY if "radius" in e)')
+        lines.append(f"        for rr in set(round(r, 2) for r in ref_radii):")
+        lines.append(f"            assert any(abs(ar - rr) < 0.1 for ar in actual_radii), (")
+        lines.append(f'                f"Reference circle edge r={{rr:.3f}} not found in actual"')
+        lines.append(f"            )")
+        lines.append("")
+
     # -- Cross-sections
     lines.append("")
     lines.append(f"class TestCrossSections:")
-    lines.append(f'    """Cross-sectional area at {len(fp.cross_sections)} positions along {axis}."""')
+    lines.append(f'    """Cross-sectional area and centroid at {len(fp.cross_sections)} positions along {axis}."""')
     lines.append("")
 
-    # Determine plane maker based on axis
+    # Determine plane maker and UV axes based on axis
     if axis.upper() == "Z":
         plane_maker = 'lambda v: gp_Pln(gp_Pnt(0, 0, v), gp_Dir(0, 0, 1))'
+        uv_axes = '("X", "Y")'
+        centroid_keys = ("centroid_x", "centroid_y")
     elif axis.upper() == "Y":
         plane_maker = 'lambda v: gp_Pln(gp_Pnt(0, v, 0), gp_Dir(0, 1, 0))'
+        uv_axes = '("X", "Z")'
+        centroid_keys = ("centroid_x", "centroid_z")
     else:
         plane_maker = 'lambda v: gp_Pln(gp_Pnt(v, 0, 0), gp_Dir(1, 0, 0))'
+        uv_axes = '("Y", "Z")'
+        centroid_keys = ("centroid_y", "centroid_z")
 
     lines.append(f"    _plane_maker = staticmethod({plane_maker})")
+    lines.append(f"    _uv_axes = {uv_axes}")
     lines.append("")
 
     lines.append(f"    @pytest.mark.parametrize(\"ref\", REF_CROSS_SECTIONS,")
     lines.append(f'        ids=[f"{axis}={{cs[\'position\']}}" for cs in REF_CROSS_SECTIONS])')
     lines.append(f"    def test_cross_section_area(self, {fixture_name}, ref):")
-    lines.append(f"        area = _cross_section_area({fixture_name}, ref[\"position\"], self._plane_maker)")
+    lines.append(f"        props = _cross_section_props({fixture_name}, ref[\"position\"], self._plane_maker, self._uv_axes)")
+    lines.append(f'        area = props["area"]')
     lines.append(f'        ref_area = ref["area"]')
     lines.append(f"        if ref_area < 0.01:  # near-zero slice")
     lines.append(f"            assert area < 0.5, f\"Expected ~0 area at pos={{ref['position']}}, got {{area:.4f}}\"")
     lines.append(f"        else:")
-    lines.append(f"            assert abs(area - ref_area) / ref_area < {cross_section_area_tol_pct / 100}, (")
+    lines.append(f"            pct = abs(area - ref_area) / ref_area * 100")
+    lines.append(f"            direction = 'too large' if area > ref_area else 'too small'")
+    lines.append(f"            assert pct / 100 < {cross_section_area_tol_pct / 100}, (")
     lines.append(f'                f"Area at {axis}={{ref[\'position\']}}: {{area:.4f}} vs ref {{ref_area:.4f}} "')
-    lines.append(f'                f"({{abs(area - ref_area) / ref_area * 100:.1f}}% off)"')
+    lines.append(f'                f"({{pct:.1f}}% {{direction}}) — adjust radius/fillet at this position"')
+    lines.append(f"            )")
+    lines.append("")
+
+    lines.append(f"    @pytest.mark.parametrize(\"ref\", REF_CROSS_SECTIONS,")
+    lines.append(f'        ids=[f"{axis}={{cs[\'position\']}}" for cs in REF_CROSS_SECTIONS])')
+    lines.append(f"    def test_cross_section_centroid(self, {fixture_name}, ref):")
+    lines.append(f'        ref_area = ref["area"]')
+    lines.append(f"        if ref_area < 0.01:")
+    lines.append(f"            pytest.skip(\"near-zero area — centroid meaningless\")")
+    lines.append(f"        props = _cross_section_props({fixture_name}, ref[\"position\"], self._plane_maker, self._uv_axes)")
+    lines.append(f'        for ref_key, prop_key in [("{centroid_keys[0]}", "centroid_u"), ("{centroid_keys[1]}", "centroid_v")]:')
+    lines.append(f'            actual = props[prop_key]')
+    lines.append(f'            ref_val = ref[ref_key]')
+    lines.append(f"            diff = actual - ref_val")
+    lines.append(f"            assert abs(diff) < {cross_section_centroid_tol_mm}, (")
+    lines.append(f'                f"Centroid {{ref_key}} at {axis}={{ref[\'position\']}}: {{actual:.4f}} vs ref {{ref_val:.4f}} "')
+    lines.append(f'                f"(shifted {{\'positive\' if diff > 0 else \'negative\'}} by {{abs(diff):.3f}}mm) — check alignment"')
+    lines.append(f"            )")
+    lines.append("")
+
+    # Determine 2D moment keys based on axis
+    if axis.upper() == "Z":
+        moment_keys = ("Ixx_2d", "Iyy_2d")
+    elif axis.upper() == "Y":
+        moment_keys = ("Ixx_2d", "Izz_2d")
+    else:
+        moment_keys = ("Iyy_2d", "Izz_2d")
+
+    lines.append(f"    @pytest.mark.parametrize(\"ref\", REF_CROSS_SECTIONS,")
+    lines.append(f'        ids=[f"{axis}={{cs[\'position\']}}" for cs in REF_CROSS_SECTIONS])')
+    lines.append(f"    def test_cross_section_shape(self, {fixture_name}, ref):")
+    lines.append(f'        """2D moments capture cross-section shape, not just area."""')
+    lines.append(f'        ref_area = ref["area"]')
+    lines.append(f"        if ref_area < 0.01:")
+    lines.append(f"            pytest.skip(\"near-zero area — shape moments meaningless\")")
+    lines.append(f"        props = _cross_section_props({fixture_name}, ref[\"position\"], self._plane_maker, self._uv_axes)")
+    lines.append(f'        for ref_key, prop_key in [("{moment_keys[0]}", "Iuu_2d"), ("{moment_keys[1]}", "Ivv_2d")]:')
+    lines.append(f'            ref_val = ref.get(ref_key, 0.0)')
+    lines.append(f"            if abs(ref_val) < 0.01:")
+    lines.append(f"                continue")
+    lines.append(f'            actual = props[prop_key]')
+    lines.append(f"            pct = abs(actual - ref_val) / abs(ref_val) * 100")
+    lines.append(f"            assert pct / 100 < {cross_section_moment_tol_pct / 100}, (")
+    lines.append(f'                f"Shape moment {{ref_key}} at {axis}={{ref[\'position\']}}: {{actual:.4f}} vs ref {{ref_val:.4f}} "')
+    lines.append(f'                f"({{pct:.1f}}% off) — cross-section shape differs"')
     lines.append(f"            )")
     lines.append("")
 
@@ -454,9 +630,10 @@ def generate_test_file(
     lines.append(f"            assert actual_r is not None, (")
     lines.append(f'                f"No intersection at {axis}={{pos}}, angle={{deg}}°"')
     lines.append(f"            )")
+    lines.append(f"            hint = 'excess' if actual_r > ref_r else 'missing'")
     lines.append(f"            assert abs(actual_r - ref_r) < {radial_tol_mm}, (")
     lines.append(f'                f"Radial at {axis}={{pos}} angle={{deg}}°: '
-                 f'{{actual_r:.4f}} vs ref {{ref_r:.4f}}"')
+                 f'{{actual_r:.4f}} vs ref {{ref_r:.4f}} — {{hint}} material"')
     lines.append(f"            )")
     lines.append("")
 
@@ -620,6 +797,23 @@ def generate_prompt(
                          f"area {t['from_area']:.1f} → {t['to_area']:.1f} mm²")
         lines.append("")
 
+    # Edge summary
+    if fp.edge_inventory:
+        edge_types = {}
+        for e in fp.edge_inventory:
+            edge_types[e["type"]] = edge_types.get(e["type"], 0) + 1
+        lines.append("### Edge summary")
+        lines.append("")
+        parts = [f"{count} {etype}" for etype, count in sorted(edge_types.items())]
+        lines.append(f"The part has {sum(edge_types.values())} edges: {', '.join(parts)}.")
+        circle_radii = sorted(set(
+            round(e["radius"], 2) for e in fp.edge_inventory if "radius" in e
+        ))
+        if circle_radii:
+            lines.append(f"- Circle edge radii (possible fillets/rounds): "
+                         f"{', '.join(f'{r:.2f}mm' for r in circle_radii)}")
+        lines.append("")
+
     # ── Process ──
     lines.append("## Process")
     lines.append("")
@@ -627,6 +821,8 @@ def generate_prompt(
                  "data tells you everything about the shape:")
     lines.append("   - `REF_FACE_INVENTORY` — every face type, area, and key "
                  "dimensions (diameters, radii)")
+    lines.append("   - `REF_EDGE_INVENTORY` — every edge type, length, and "
+                 "radii (circle edges indicate fillets/rounds)")
     lines.append("   - `REF_CROSS_SECTIONS` — cross-sectional area at multiple "
                  f"{axis} positions")
     lines.append("   - `REF_RADIAL_PROFILE` — outer radius at multiple positions × angles")

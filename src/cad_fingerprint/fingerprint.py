@@ -26,6 +26,7 @@ class CadFingerprint:
     face_inventory: list[dict]
     cross_sections: list[dict]
     radial_profile: list[dict]
+    edge_inventory: list[dict] = field(default_factory=list)
     build_quality: dict = field(default_factory=dict)
     description: dict = field(default_factory=dict)
     source_format: str = "step"
