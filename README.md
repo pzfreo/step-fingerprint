@@ -40,7 +40,11 @@ without needing to compare B-rep trees or CAD history.
 | Build quality | Wall thickness, sharp edges, free edges, non-manifold geometry |
 
 For STL files, face type classification is unavailable (no analytical surface
-information exists in the mesh); all other measurements work normally.
+information exists in the mesh); all other measurements work normally. The
+radial profile uses direct Möller-Trumbore ray-triangle intersection (rather
+than OCCT's `IntCurvesFace_ShapeIntersector`, which only works on analytical
+BREP surfaces) and shoots rays from the bounding-box centre so parts that are
+not centred on the world origin still produce meaningful results.
 
 ## Installation
 
@@ -146,9 +150,11 @@ OCP bindings) directly:
 - **Cross-sections** — slices the solid at N planes along the primary axis
   using `BRepAlgoAPI_Section`; computes area, centroid, and second moments of
   each cross-section polygon.
-- **Radial profile** — shoots rays from the axis at M axial heights × K angles
-  using `IntCurvesFace_ShapeIntersector`; records the outermost intersection
-  radius at each angle.
+- **Radial profile** — for STEP: shoots rays from the axis at M axial heights ×
+  K angles using `IntCurvesFace_ShapeIntersector`; records the outermost
+  intersection radius at each angle. For STL: uses Möller-Trumbore
+  ray-triangle intersection from the bounding-box centre to handle parts not
+  aligned with the world origin.
 - **Build quality** — `ShapeAnalysis_FreeBounds` for free/non-manifold edges;
   `BRepCheck_Analyzer` for invalid geometry; minimum wall thickness via
   ray-sampling.
