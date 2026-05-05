@@ -467,6 +467,115 @@ def radial_profile(
     return profiles
 
 
+def radial_profile_mesh(
+    stl_face,
+    axis: str = "Z",
+    num_slices: int = 15,
+    num_angles: int = 12,
+    margin: float = 0.01,
+) -> list[dict]:
+    """Radial profile for STL using Möller-Trumbore ray-triangle intersection.
+
+    IntCurvesFace_ShapeIntersector only works on analytical BREP surfaces, not
+    triangulated faces, so STL analysis needs this direct triangle approach.
+    Returns the outermost (largest-t) intersection per ray so the result
+    represents the outer surface radius, consistent with radial_profile().
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.TopLoc import TopLoc_Location
+
+    loc = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(stl_face.wrapped, loc)
+    if tri is None:
+        return []
+
+    triangles = []
+    for i in range(1, tri.NbTriangles() + 1):
+        t = tri.Triangle(i)
+        n1, n2, n3 = t.Get()
+        p1, p2, p3 = tri.Node(n1), tri.Node(n2), tri.Node(n3)
+        triangles.append((
+            (p1.X(), p1.Y(), p1.Z()),
+            (p2.X(), p2.Y(), p2.Z()),
+            (p3.X(), p3.Y(), p3.Z()),
+        ))
+
+    bb = stl_face.bounding_box()
+    axis = axis.upper()
+    # Use bounding-box centre as axis origin so offset parts still get hits.
+    cx = (bb.min.X + bb.max.X) / 2
+    cy = (bb.min.Y + bb.max.Y) / 2
+    cz = (bb.min.Z + bb.max.Z) / 2
+    if axis == "X":
+        lo, hi = bb.min.X, bb.max.X
+        ai = 0
+        def make_origin(pos): return (pos, cy, cz)
+        def make_dir(angle): return (0.0, math.cos(angle), math.sin(angle))
+    elif axis == "Y":
+        lo, hi = bb.min.Y, bb.max.Y
+        ai = 1
+        def make_origin(pos): return (cx, pos, cz)
+        def make_dir(angle): return (math.cos(angle), 0.0, math.sin(angle))
+    else:
+        lo, hi = bb.min.Z, bb.max.Z
+        ai = 2
+        def make_origin(pos): return (cx, cy, pos)
+        def make_dir(angle): return (math.cos(angle), math.sin(angle), 0.0)
+
+    span = hi - lo
+    lo += span * margin
+    hi -= span * margin
+    if num_slices < 2:
+        num_slices = 2
+    step = (hi - lo) / (num_slices - 1)
+
+    _EPS = 1e-9
+
+    def _intersect(orig, d, v0, v1, v2):
+        e1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+        e2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+        h = (d[1]*e2[2]-d[2]*e2[1], d[2]*e2[0]-d[0]*e2[2], d[0]*e2[1]-d[1]*e2[0])
+        a = e1[0]*h[0]+e1[1]*h[1]+e1[2]*h[2]
+        if abs(a) < _EPS:
+            return None
+        f = 1.0 / a
+        s = (orig[0]-v0[0], orig[1]-v0[1], orig[2]-v0[2])
+        u = f * (s[0]*h[0]+s[1]*h[1]+s[2]*h[2])
+        if u < 0.0 or u > 1.0:
+            return None
+        q = (s[1]*e1[2]-s[2]*e1[1], s[2]*e1[0]-s[0]*e1[2], s[0]*e1[1]-s[1]*e1[0])
+        v = f * (d[0]*q[0]+d[1]*q[1]+d[2]*q[2])
+        if v < 0.0 or u + v > 1.0:
+            return None
+        t = f * (e2[0]*q[0]+e2[1]*q[1]+e2[2]*q[2])
+        return t if t > -_EPS else None
+
+    profiles = []
+    for i in range(num_slices):
+        pos = lo + i * step
+        # pre-filter: only triangles whose axial extent overlaps this slice
+        candidates = [
+            tri for tri in triangles
+            if min(tri[0][ai], tri[1][ai], tri[2][ai]) <= pos + _EPS
+            and max(tri[0][ai], tri[1][ai], tri[2][ai]) >= pos - _EPS
+        ]
+        angle_data = {}
+        for j in range(num_angles):
+            angle_deg = j * (360.0 / num_angles)
+            angle_rad = math.radians(angle_deg)
+            orig = make_origin(pos)
+            d = make_dir(angle_rad)
+            max_t = None
+            for v0, v1, v2 in candidates:
+                t = _intersect(orig, d, v0, v1, v2)
+                if t is not None and (max_t is None or t > max_t):
+                    max_t = t
+            angle_data[angle_deg] = round(max_t, 4) if max_t is not None else None
+        profiles.append({"position": round(pos, 4), "radii": angle_data})
+
+    return profiles
+
+
 # ── build quality ────────────────────────────────────────────────────
 
 
@@ -942,7 +1051,7 @@ def analyze_stl(
               "area": round(va["surface_area"], 4)}]
 
     xs = cross_section_areas_mesh(stl_face, axis=axis, num_slices=num_cross_sections)
-    rp = radial_profile(stl_face, axis=axis, num_slices=num_radial_slices, num_angles=num_angles)
+    rp = radial_profile_mesh(stl_face, axis=axis, num_slices=num_radial_slices, num_angles=num_angles)
     bq = build_quality_stl(stl_face, stl_path=path)
     desc = describe_part(bb, va, topo, faces, xs, axis=axis)
 
