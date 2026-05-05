@@ -725,12 +725,11 @@ def _mesh_properties(stl_face) -> tuple[dict, dict]:
     if tri is None:
         raise ValueError("STL face contains no triangulation")
 
-    nodes = tri.Nodes()
     triangles = []
     for i in range(1, tri.NbTriangles() + 1):
         t = tri.Triangle(i)
         n1, n2, n3 = t.Get()
-        p1, p2, p3 = nodes.Value(n1), nodes.Value(n2), nodes.Value(n3)
+        p1, p2, p3 = tri.Node(n1), tri.Node(n2), tri.Node(n3)
         triangles.append((
             (p1.X(), p1.Y(), p1.Z()),
             (p2.X(), p2.Y(), p2.Z()),
@@ -828,7 +827,6 @@ def cross_section_areas_mesh(
     if tri is None:
         return []
 
-    nodes = tri.Nodes()
     axis = axis.upper()
     if axis == "X":
         ai, uv = 0, ("y", "z")
@@ -842,7 +840,7 @@ def cross_section_areas_mesh(
 
     pts = []
     for i in range(1, tri.NbNodes() + 1):
-        n = nodes.Value(i)
+        n = tri.Node(i)
         pts.append((n.X(), n.Y(), n.Z()))
 
     axis_vals = [p[ai] for p in pts]
