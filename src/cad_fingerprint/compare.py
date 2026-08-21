@@ -186,7 +186,8 @@ def compare_fingerprints(
             "samples": h["samples"],
             "tolerance": max_tol,
             "mean_tolerance": mean_tol,
-            "resolution_limited": floor > hausdorff_tol_mm,
+            "resolution_limited": (max_tol > hausdorff_tol_mm
+                                   or mean_tol > hausdorff_mean_tol_mm),
             "max_status": max_status,
             "mean_status": mean_status,
             "status": worst,

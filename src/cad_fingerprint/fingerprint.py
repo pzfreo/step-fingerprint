@@ -42,6 +42,7 @@ class CadFingerprint:
         num_angles: int = 12,
         capture_mesh: bool = True,
         mesh_deflection: Optional[float] = None,
+        max_mesh_triangles: int = analyze.DEFAULT_MAX_TRIANGLES,
     ) -> "CadFingerprint":
         """Analyze an STL file and return its fingerprint.
 
@@ -57,6 +58,7 @@ class CadFingerprint:
             num_angles=num_angles,
             capture_mesh=capture_mesh,
             mesh_deflection=mesh_deflection,
+            max_mesh_triangles=max_mesh_triangles,
         )
         return cls(**data)
 
@@ -70,6 +72,7 @@ class CadFingerprint:
         num_angles: int = 12,
         capture_mesh: bool = True,
         mesh_deflection: Optional[float] = None,
+        max_mesh_triangles: int = analyze.DEFAULT_MAX_TRIANGLES,
     ) -> "CadFingerprint":
         """Analyze a STEP file and return its fingerprint."""
         data = analyze.analyze_step(
@@ -80,6 +83,7 @@ class CadFingerprint:
             num_angles=num_angles,
             capture_mesh=capture_mesh,
             mesh_deflection=mesh_deflection,
+            max_mesh_triangles=max_mesh_triangles,
         )
         return cls(**data)
 

@@ -380,21 +380,69 @@ class TestMeshResolutionLimits:
 
     def test_coarse_reference_raises_the_tolerances(self, tmp_path):
         """A mesh too coarse to resolve 0.3 mm must not assert 0.3 mm."""
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+        from cad_fingerprint.hausdorff import tolerance_floor
+
+        path = str(tmp_path / "coarse.step")
+        export_step(Sphere(radius=10), path)
+        fp = CadFingerprint.from_step(path, mesh_deflection=1.0)
+        floor = tolerance_floor(fp.surface_mesh)
+        assert floor > 0.3, "1 mm facets on a 10 mm ball should exceed 0.3 mm"
+
+        source = generate_test_file(fp, module_name="coarse")
+        assert "tolerances were raised" in source
+        assert f"< {floor}," in source
+
+        namespace = {}
+        exec(compile(source, "coarse_test.py", "exec"), namespace)
+        assert namespace["REF_MESH"]["resolution"] > 0.1
+
+    def test_flat_part_keeps_its_tolerances_however_coarse(self, tmp_path):
+        """A box's facets are exact — deflection is irrelevant to its error."""
         from build123d import Box, export_step
         from cad_fingerprint import CadFingerprint
         from cad_fingerprint.generate import generate_test_file
 
-        path = str(tmp_path / "coarse.step")
+        path = str(tmp_path / "flat.step")
         export_step(Box(10, 20, 30), path)
-        fp = CadFingerprint.from_step(path, mesh_deflection=1.0)
-        source = generate_test_file(fp, module_name="coarse")
+        fp = CadFingerprint.from_step(path, mesh_deflection=2.0)
+        assert fp.surface_mesh["resolution"] == 0.0
 
-        assert "raised to match the reference" in source
-        namespace = {}
-        exec(compile(source, "coarse_test.py", "exec"), namespace)
-        # deflection 1.0 → floor 2.0 mm, well above the 0.3 mm default
-        assert "< 2.0," in source
-        assert namespace["REF_MESH"]["resolution"] == 1.0
+        source = generate_test_file(fp, module_name="flat")
+        assert "tolerances were raised" not in source
+        assert "< 0.3," in source
+
+    def test_finer_deflection_tightens_the_angular_limit(self, tmp_path):
+        """Asking for a finer mesh has to actually produce a finer one.
+
+        On blends and small fillets the angular limit, not the linear one,
+        is what bounds the chord error.
+        """
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+
+        path = str(tmp_path / "ball.step")
+        export_step(Sphere(radius=10), path)
+        default = CadFingerprint.from_step(path).surface_mesh
+        finer = CadFingerprint.from_step(
+            path, mesh_deflection=default["deflection"] / 10,
+            max_mesh_triangles=200000,
+        ).surface_mesh
+
+        assert finer["angular_deflection"] < default["angular_deflection"]
+        assert finer["triangle_count"] > default["triangle_count"]
+        assert finer["resolution"] < default["resolution"]
+
+    def test_triangle_budget_is_configurable(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+
+        path = str(tmp_path / "budget.step")
+        export_step(Sphere(radius=10), path)
+        small = CadFingerprint.from_step(path, max_mesh_triangles=500).surface_mesh
+        assert small["triangle_count"] <= 500
 
     def test_fine_reference_keeps_the_requested_tolerances(self, tmp_path):
         from build123d import Box, export_step
@@ -406,9 +454,29 @@ class TestMeshResolutionLimits:
         fp = CadFingerprint.from_step(path)
         source = generate_test_file(fp, module_name="fine")
 
-        assert "raised to match the reference" not in source
+        assert "tolerances were raised" not in source
         assert "< 0.3," in source
         assert "< 0.05," in source
+
+    def test_stl_facet_error_is_measured(self, tmp_path):
+        """A curved STL is itself an approximation — that must be recorded.
+
+        Otherwise a coarsely exported reference holds implementations to a
+        tolerance its own facets cannot meet.
+        """
+        from build123d import Box, Sphere, export_stl
+        from cad_fingerprint.analyze import analyze_stl
+
+        ball = str(tmp_path / "ball_res.stl")
+        block = str(tmp_path / "block_res.stl")
+        export_stl(Sphere(radius=10), ball)
+        export_stl(Box(10, 20, 30), block)
+
+        # Curved: facets are chords, so they carry a real error
+        assert analyze_stl(ball)["surface_mesh"]["resolution"] > 0.0
+        # Flat: a box's facets are exact, and its sharp edges are features,
+        # not chord error
+        assert analyze_stl(block)["surface_mesh"]["resolution"] == 0.0
 
     def test_stl_deflection_clusters_the_reference_mesh(self, tmp_path):
         """--mesh-deflection has to do something for STL, not silently pass."""
@@ -424,7 +492,6 @@ class TestMeshResolutionLimits:
         assert clustered["triangle_count"] < as_supplied["triangle_count"]
         assert clustered["cluster_cell"] == 1.5
         assert clustered["resolution"] == 1.5
-        assert as_supplied["resolution"] == 0.0   # facets are ground truth
 
     def test_stl_triangle_budget_is_enforced(self, tmp_path):
         from build123d import Sphere, export_stl
@@ -491,7 +558,7 @@ class TestCompareMeanTolerance:
         ref_path = str(tmp_path / "a.step")
         impl_path = str(tmp_path / "b.step")
         export_step(Box(10, 20, 30), ref_path)
-        export_step(Box(10, 20, 30.4), impl_path)
+        export_step(Box(10, 20, 31), impl_path)
         ref = CadFingerprint.from_step(ref_path)
         impl = CadFingerprint.from_step(impl_path)
 
@@ -500,7 +567,19 @@ class TestCompareMeanTolerance:
         strict = compare_fingerprints(ref, impl, hausdorff_mean_tol_mm=0.001,
                                       hausdorff_samples=500)
         assert relaxed["hausdorff"]["mean_status"] == "pass"
-        assert strict["hausdorff"]["mean_status"] != "pass"
-        assert strict["hausdorff"]["status"] != "pass"
-        # ... but never tighter than the meshes can resolve
-        assert strict["hausdorff"]["mean_tolerance"] > 0.001
+        assert strict["hausdorff"]["mean_status"] == "fail"
+        assert strict["hausdorff"]["status"] == "fail"
+
+    def test_mean_tolerance_is_never_below_the_mesh_resolution(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.compare import compare_fingerprints
+
+        path = str(tmp_path / "res.step")
+        export_step(Sphere(radius=10), path)
+        ref = CadFingerprint.from_step(path, mesh_deflection=1.0)
+        impl = CadFingerprint.from_step(path, mesh_deflection=1.0)
+        result = compare_fingerprints(ref, impl, hausdorff_mean_tol_mm=0.0001,
+                                      hausdorff_samples=500)
+        assert result["hausdorff"]["mean_tolerance"] > 0.0001
+        assert result["hausdorff"]["resolution_limited"] is True

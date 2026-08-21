@@ -12,6 +12,19 @@ import sys
 from pathlib import Path
 
 
+def _positive_int(value: str) -> int:
+    """argparse type for counts that must be at least 1."""
+    import argparse as _argparse
+
+    number = int(value)
+    if number < 1:
+        raise _argparse.ArgumentTypeError(
+            f"must be at least 1, got {number} — zero samples would report "
+            f"a perfect match for any part"
+        )
+    return number
+
+
 def _add_tolerance_args(parser):
     """Add shared tolerance arguments to a parser."""
     parser.add_argument("--volume-tol", type=float, default=1.0,
@@ -55,7 +68,7 @@ def _add_analysis_args(parser):
         help="Number of angular samples per radial slice (default: 12)",
     )
     parser.add_argument(
-        "--hausdorff-samples", type=int, default=2000,
+        "--hausdorff-samples", type=_positive_int, default=2000,
         help="Surface sample points per direction for the Hausdorff "
              "distance (default: 2000)",
     )
@@ -65,6 +78,12 @@ def _add_analysis_args(parser):
              "for a STEP reference and for the part under test; for an STL "
              "reference, whose facets cannot be re-meshed, the "
              "vertex-clustering cell (default: bounding-box diagonal / 1000)",
+    )
+    parser.add_argument(
+        "--max-mesh-triangles", type=_positive_int, default=12000,
+        help="Triangle budget for the reference surface mesh — raise it for "
+             "tighter surface-deviation tolerances at the cost of a bigger "
+             "test file (default: 12000)",
     )
     parser.add_argument(
         "--no-hausdorff", action="store_true",
@@ -100,6 +119,7 @@ def _run_analyze(args):
             num_angles=args.angles,
             capture_mesh=not args.no_hausdorff,
             mesh_deflection=args.mesh_deflection,
+            max_mesh_triangles=args.max_mesh_triangles,
         )
         print("  (STL mode: face inventory shows mesh stats only, no surface type classification)")
     else:
@@ -111,6 +131,7 @@ def _run_analyze(args):
             num_angles=args.angles,
             capture_mesh=not args.no_hausdorff,
             mesh_deflection=args.mesh_deflection,
+            max_mesh_triangles=args.max_mesh_triangles,
         )
 
     va = fp.volume_and_area
@@ -126,7 +147,8 @@ def _run_analyze(args):
               f"at {fp.surface_mesh['deflection']:.4f} mm deflection ({mesh_kb} KB embedded)")
         if mesh_kb > 250:
             hint = ("re-export the STL more coarsely" if is_stl
-                    else "raise --mesh-deflection")
+                    else "raise --mesh-deflection or lower "
+                         "--max-mesh-triangles")
             print(f"  Note: that mesh is large for an embedded test file — "
                   f"{hint}, or pass --no-hausdorff to skip it.")
 
@@ -192,6 +214,7 @@ def _run_compare(args):
         num_angles=args.angles,
         capture_mesh=not args.no_hausdorff,
         mesh_deflection=args.mesh_deflection,
+        max_mesh_triangles=args.max_mesh_triangles,
     )
 
     print(f"Analyzing implementation: {impl_path}...")
@@ -207,6 +230,7 @@ def _run_compare(args):
             if args.mesh_deflection is not None
             else ref_fp.surface_mesh.get("deflection")
         ),
+        max_mesh_triangles=args.max_mesh_triangles,
     )
 
     print()

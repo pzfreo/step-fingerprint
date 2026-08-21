@@ -670,12 +670,12 @@ def generate_test_file(
         from .hausdorff import tolerance_floor
 
         floor = tolerance_floor(fp.surface_mesh)
+        max_tol = max(hausdorff_tol_mm, floor)
+        mean_tol = max(hausdorff_mean_tol_mm, floor / 4.0)
         lines.extend(_hausdorff_test_lines(
-            fixture_name,
-            max(hausdorff_tol_mm, floor),
-            max(hausdorff_mean_tol_mm, floor / 4.0),
-            fp.surface_mesh,
-            raised=floor > hausdorff_tol_mm,
+            fixture_name, max_tol, mean_tol, fp.surface_mesh,
+            raised=(max_tol > hausdorff_tol_mm
+                    or mean_tol > hausdorff_mean_tol_mm),
         ))
 
     # -- Build quality
@@ -774,7 +774,11 @@ def _reference_mesh_lines(surface_mesh: dict, samples: int) -> list[str]:
         f'    "bbox_max": {_fmt_tuple(surface_mesh["bbox_max"], 6)},',
         f'    "index_bits": {surface_mesh["index_bits"]},',
         f'    "deflection": {surface_mesh["deflection"]},',
-        f'    "resolution": {surface_mesh.get("resolution", surface_mesh["deflection"])},',
+        f'    "angular_deflection":'
+        f' {surface_mesh.get("angular_deflection", 0.35)},',
+        f'    "resolution": {surface_mesh.get("resolution", 0.0)},',
+        f'    "candidate_resolution":'
+        f' {surface_mesh.get("candidate_resolution", surface_mesh["deflection"])},',
     ]
     lines.extend(_wrapped_b64("vertices", surface_mesh["vertices"]))
     lines.extend(_wrapped_b64("triangles", surface_mesh["triangles"]))
@@ -846,7 +850,9 @@ def _hausdorff_helper_lines() -> list[str]:
         if key in _HAUSDORFF_CACHE:
             return _HAUSDORFF_CACHE[key]
         reference = decode_mesh(REF_MESH)
-        actual = _triangulate(shape, REF_MESH["deflection"], 0.35, True)
+        actual = _triangulate(
+            shape, REF_MESH["deflection"], REF_MESH["angular_deflection"], True
+        )
         result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
         if len(_HAUSDORFF_CACHE) > 4:
             _HAUSDORFF_CACHE.clear()
@@ -871,15 +877,28 @@ def _hausdorff_test_lines(
         surface_mesh: the reference mesh entry, for the explanatory comment.
         raised: whether mesh resolution forced the tolerances up.
     """
-    note = [
-        f"# Surface-deviation tolerances were raised to match the reference",
-        f"# mesh resolution ({surface_mesh['resolution']:.4f} mm): two"
-        f" triangulations of the same",
-        f"# surface differ by about twice that, so anything tighter would"
-        f" flag meshing",
-        f"# noise as a defect. Re-run with a smaller --mesh-deflection for"
-        f" a finer check.",
-    ] if raised else []
+    from .hausdorff import mesh_resolution
+
+    if raised:
+        advice = (
+            "# Export the STL more finely for a tighter check."
+            if not surface_mesh.get("remeshed", True)
+            else "# Re-run with a smaller --mesh-deflection and a larger"
+                 " --max-mesh-triangles\n# for a finer reference mesh and"
+                 " tighter tolerances."
+        )
+        note = [
+            f"# Surface-deviation tolerances were raised to match the meshing"
+            f" error",
+            f"# ({mesh_resolution(surface_mesh):.4f} mm — this reference mesh"
+            f" plus the mesh the part",
+            f"# under test is measured against). Two triangulations of one"
+            f" surface differ by",
+            f"# about that much, so anything tighter would flag meshing noise"
+            f" as a defect.",
+        ] + advice.split("\n")
+    else:
+        note = []
     body = textwrap.dedent(f'''\
 
     class TestSurfaceDeviation:
@@ -1042,7 +1061,7 @@ def generate_prompt(
                  f"{axis} positions")
     lines.append("   - `REF_RADIAL_PROFILE` — outer radius at multiple positions × angles")
     lines.append("   - `REF_VOLUME`, `REF_SURFACE_AREA`, `REF_BBOX_*` — global properties")
-    if getattr(fp, "surface_mesh", None):
+    if getattr(fp, "surface_mesh", None) and fp.surface_mesh.get("triangle_count"):
         lines.append("   - `REF_MESH` — the triangulated reference surface, used by the "
                      "Hausdorff surface-deviation tests")
     lines.append("   - `REF_INERTIA` — moments of inertia (very sensitive to mass distribution)")

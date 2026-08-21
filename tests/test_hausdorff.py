@@ -256,3 +256,113 @@ class TestHausdorffDistance:
         for key in ("forward", "backward"):
             assert set(result[key]) == {"max", "mean", "rms", "p95"}
         assert result["samples"] == 100
+
+
+# ── facet resolution estimate ────────────────────────────────────────
+
+class TestFacetResolution:
+    def test_flat_mesh_has_no_chord_error(self):
+        """A cube's facets are exact; its 90° edges are features, not error."""
+        from cad_fingerprint.hausdorff import estimate_facet_resolution
+
+        assert estimate_facet_resolution(*cube_mesh(size=10.0)) == 0.0
+
+    def test_faceted_cylinder_error_tracks_the_facet_size(self):
+        """Chord error of an n-gon prism approximating a cylinder: r(1-cos(pi/n))."""
+        from cad_fingerprint.hausdorff import estimate_facet_resolution
+
+        def prism(sides, radius=10.0, height=4.0):
+            vertices, triangles = [], []
+            for i in range(sides):
+                angle = 2 * math.pi * i / sides
+                x, y = radius * math.cos(angle), radius * math.sin(angle)
+                vertices.append((x, y, 0.0))
+                vertices.append((x, y, height))
+            for i in range(sides):
+                a, b = 2 * i, 2 * i + 1
+                c, d = (2 * (i + 1)) % (2 * sides), (2 * (i + 1) + 1) % (2 * sides)
+                triangles.append((a, c, b))
+                triangles.append((b, c, d))
+            return vertices, triangles
+
+        for sides in (12, 24, 48):
+            true_error = 10.0 * (1 - math.cos(math.pi / sides))
+            estimate = estimate_facet_resolution(*prism(sides))
+            assert estimate > 0
+            # Within 2x of the true sagitta, and never wildly optimistic
+            assert true_error / 2 < estimate < true_error * 3, (
+                f"{sides} sides: estimate {estimate:.5f} vs true {true_error:.5f}"
+            )
+
+    def test_finer_facets_estimate_a_smaller_error(self):
+        from cad_fingerprint.hausdorff import estimate_facet_resolution
+
+        def dome(steps, radius=10.0):
+            vertices, triangles = [], []
+            for i in range(steps + 1):
+                theta = math.pi / 2 * i / steps
+                for j in range(steps + 1):
+                    phi = math.pi / 2 * j / steps
+                    vertices.append((
+                        radius * math.sin(theta) * math.cos(phi),
+                        radius * math.sin(theta) * math.sin(phi),
+                        radius * math.cos(theta),
+                    ))
+            row = steps + 1
+            for i in range(steps):
+                for j in range(steps):
+                    a = i * row + j
+                    triangles.append((a, a + 1, a + row))
+                    triangles.append((a + 1, a + row + 1, a + row))
+            return vertices, triangles
+
+        coarse = estimate_facet_resolution(*dome(6))
+        fine = estimate_facet_resolution(*dome(24))
+        assert fine < coarse / 3
+
+    def test_empty_mesh(self):
+        from cad_fingerprint.hausdorff import estimate_facet_resolution
+
+        assert estimate_facet_resolution([], []) == 0.0
+
+
+class TestClusterDecimate:
+    def test_reduces_a_dense_mesh(self):
+        from cad_fingerprint.hausdorff import cluster_decimate
+
+        vertices, triangles = cube_mesh(size=10.0)
+        # Subdivide-free stand-in: many cubes' worth of coincident geometry
+        v2, t2 = cluster_decimate(vertices, triangles, cell=20.0)
+        assert len(v2) < len(vertices)
+        assert len(t2) <= len(triangles)
+
+    def test_moves_vertices_by_less_than_the_cell(self):
+        from cad_fingerprint.hausdorff import TriangleGrid, cluster_decimate
+
+        vertices, triangles = cube_mesh(size=10.0)
+        cell = 1.0
+        v2, t2 = cluster_decimate(vertices, triangles, cell)
+        grid = TriangleGrid(v2, t2)
+        for p in vertices:
+            assert grid.nearest_distance(p) < cell * math.sqrt(3)
+
+    def test_zero_cell_is_a_no_op(self):
+        from cad_fingerprint.hausdorff import cluster_decimate
+
+        vertices, triangles = cube_mesh()
+        assert cluster_decimate(vertices, triangles, 0.0) == (vertices, triangles)
+
+
+class TestSampleCountValidation:
+    def test_zero_samples_is_rejected(self):
+        """Zero samples would grade any pair of shapes as a perfect match."""
+        import pytest
+
+        with pytest.raises(ValueError, match="at least 1"):
+            hausdorff_distance(cube_mesh(10.0), cube_mesh(20.0), samples=0)
+
+    def test_negative_samples_is_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            hausdorff_distance(cube_mesh(), cube_mesh(), samples=-5)

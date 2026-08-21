@@ -154,24 +154,110 @@ def cluster_decimate(vertices, triangles, cell: float) -> tuple[list, list]:
     return new_vertices, new_triangles
 
 
-def mesh_resolution(surface_mesh: dict) -> float:
-    """How far a stored mesh may sit from the surface it represents, in mm.
+def estimate_facet_resolution(
+    vertices, triangles, smooth_angle_limit: float = 0.7854,
+) -> float:
+    """Estimate how far a triangulation sits from the smooth surface behind it.
 
-    Two independent triangulations of the same surface can differ by about
-    twice this, which is the floor below which a Hausdorff tolerance cannot
-    distinguish a real defect from meshing noise.
+    An STL arrives with no analytical surface, so its chord error has to be
+    read off the facets themselves. Across a smooth interior edge the two
+    facets turn by an angle ``theta`` over a span ``h``, approximating an arc
+    of radius ``h / theta`` whose chord sits ``h * theta / 8`` inside it.
+
+    ``h`` is measured perpendicular to the shared edge — the direction the
+    surface actually curves in — so a mesh of long thin facets (a cylinder
+    wall, a swept rib) is not mistaken for a coarse one.
+
+    Edges that turn by more than ``smooth_angle_limit`` are treated as real
+    feature edges — a cube's corners are exact, not an approximation — and
+    ignored. The worst remaining edge is returned, which is the right pairing
+    for a worst-case Hausdorff tolerance.
+    """
+    if not triangles:
+        return 0.0
+
+    normals = []
+    for i, j, k in triangles:
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        length = math.sqrt(nx * nx + ny * ny + nz * nz)
+        normals.append(
+            (nx / length, ny / length, nz / length) if length > 1e-15 else None
+        )
+
+    # Keyed on position, not index: STL facets rarely share vertex indices.
+    def key(index):
+        x, y, z = vertices[index]
+        return (round(x, 6), round(y, 6), round(z, 6))
+
+    edges: dict = {}
+    for t, (i, j, k) in enumerate(triangles):
+        for a, b, opposite in ((i, j, k), (j, k, i), (k, i, j)):
+            ka, kb = key(a), key(b)
+            edge = (ka, kb) if ka <= kb else (kb, ka)
+            edges.setdefault(edge, []).append((t, key(opposite)))
+
+    worst = 0.0
+    for (ka, kb), facets in edges.items():
+        if len(facets) != 2:
+            continue  # boundary, or non-manifold — no dihedral to read
+        (t1, p1), (t2, p2) = facets
+        n1, n2 = normals[t1], normals[t2]
+        if n1 is None or n2 is None:
+            continue
+        dot = min(max(n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2], -1.0), 1.0)
+        theta = math.acos(dot)
+        if theta > smooth_angle_limit:
+            continue  # a genuine sharp edge, not chord error
+        span = (_distance_to_line(p1, ka, kb) + _distance_to_line(p2, ka, kb)) / 2
+        worst = max(worst, span * theta / 8.0)
+    return worst
+
+
+def _distance_to_line(point, a, b) -> float:
+    """Perpendicular distance from a point to the line through a and b."""
+    dx, dy, dz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    length2 = dx * dx + dy * dy + dz * dz
+    if length2 < 1e-24:
+        return 0.0
+    px, py, pz = point[0] - a[0], point[1] - a[1], point[2] - a[2]
+    cx = py * dz - pz * dy
+    cy = pz * dx - px * dz
+    cz = px * dy - py * dx
+    return math.sqrt((cx * cx + cy * cy + cz * cz) / length2)
+
+
+def mesh_resolution(surface_mesh: dict) -> float:
+    """Combined meshing error in mm for a stored reference mesh, in mm.
+
+    Two terms, because two surfaces are involved: how far the stored mesh
+    sits from the reference surface, plus how far the part under test will
+    sit from its own surface when meshed at the recorded deflection.
     """
     if not surface_mesh:
         return 0.0
-    return max(
-        surface_mesh.get("resolution", 0.0),
-        surface_mesh.get("deflection", 0.0),
+    return (
+        surface_mesh.get("resolution", 0.0)
+        + surface_mesh.get(
+            "candidate_resolution", surface_mesh.get("deflection", 0.0)
+        )
     )
 
 
 def tolerance_floor(surface_mesh: dict) -> float:
-    """Smallest deviation a mesh of this resolution can meaningfully resolve."""
-    return 2.0 * mesh_resolution(surface_mesh)
+    """Smallest deviation a mesh of this resolution can meaningfully resolve.
+
+    Three times the combined meshing error. Measured across spheres,
+    cylinders, cones and tori at deflections from 0.02 mm to 1.5 mm, the
+    deviation between two triangulations of one surface reached 1.15x the
+    combined estimate — a facet's centre bulges further from the true
+    surface than its edges do — so the multiplier carries that plus margin.
+    """
+    return 3.0 * mesh_resolution(surface_mesh)
 
 
 # ── point ↔ triangle distance ────────────────────────────────────────
@@ -429,11 +515,15 @@ def hausdorff_distance(mesh_a, mesh_b, samples: int = 2000) -> dict:
     Args:
         mesh_a: (vertices, triangles) of the reference mesh.
         mesh_b: (vertices, triangles) of the mesh being compared.
-        samples: points sampled per direction.
+        samples: points sampled per direction; must be positive.
 
     Returns a dict with ``forward`` (A→B), ``backward`` (B→A) and combined
     ``hausdorff`` / ``mean`` / ``rms`` / ``p95`` values, all in model units.
     """
+    if samples < 1:
+        # Zero samples would report a flawless match for any pair of shapes.
+        raise ValueError(f"samples must be at least 1, got {samples}")
+
     va, ta = mesh_a
     vb, tb = mesh_b
     grid_a = TriangleGrid(va, ta)

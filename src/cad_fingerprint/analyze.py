@@ -582,10 +582,13 @@ def radial_profile_mesh(
 DEFAULT_MAX_TRIANGLES = 12000
 
 
+DEFAULT_ANGULAR_DEFLECTION = 0.35
+
+
 def mesh_shape(
     shape,
     deflection: float | None = None,
-    angular_deflection: float = 0.35,
+    angular_deflection: float | None = None,
     max_triangles: int = DEFAULT_MAX_TRIANGLES,
     remesh: bool = True,
 ) -> dict:
@@ -603,18 +606,26 @@ def mesh_shape(
             bounding-box diagonal. For STL it cannot re-mesh the facets, so
             it is used as the vertex-clustering cell instead (and as the
             deflection the part under test is meshed with).
-        angular_deflection: angular deflection in radians.
+        angular_deflection: angular deflection in radians; ``None`` scales it
+            with ``deflection``, since on blends and small fillets the angular
+            limit — not the linear one — is what bounds the chord error.
         max_triangles: budget. STEP meshes are retried coarser until they
-            fit; STL meshes are vertex-clustered.
+            fit; STL meshes are vertex-clustered. Raising it buys a finer
+            reference mesh, hence tighter tolerances, at the cost of a bigger
+            generated test file.
         remesh: run BRepMesh_IncrementalMesh (False for STL, which arrives
             already triangulated and has no analytical surface to re-mesh).
 
     Returns the encoded mesh plus:
-        ``deflection`` — what the part under test should be meshed with,
+        ``deflection`` / ``angular_deflection`` — what the part under test
+            should be meshed with,
         ``resolution`` — how far this mesh may sit from the true surface,
+        ``candidate_resolution`` — the same, for the part under test,
         ``remeshed`` / ``cluster_cell`` — how the budget was met.
     """
-    from .hausdorff import cluster_decimate, encode_mesh
+    from .hausdorff import (
+        cluster_decimate, encode_mesh, estimate_facet_resolution,
+    )
 
     bb = shape.bounding_box()
     diag = math.sqrt(
@@ -623,8 +634,16 @@ def mesh_shape(
         + (bb.max.Z - bb.min.Z) ** 2
     )
     requested = deflection
+    auto = min(max(diag / 1000.0, 0.005), 0.2)
     if deflection is None:
-        deflection = min(max(diag / 1000.0, 0.005), 0.2)
+        deflection = auto
+    if angular_deflection is None:
+        # Asking for a finer surface has to tighten both limits, or the
+        # angular one silently caps how fine the mesh can get.
+        angular_deflection = min(
+            max(DEFAULT_ANGULAR_DEFLECTION * min(1.0, deflection / auto), 0.05),
+            0.5,
+        )
 
     vertices, triangles = _triangulate(shape, deflection, angular_deflection, remesh)
 
@@ -632,13 +651,17 @@ def mesh_shape(
     if remesh:
         # Analytical surfaces can simply be re-meshed coarser.
         attempts = 0
-        while len(triangles) > max_triangles and attempts < 5:
+        while len(triangles) > max_triangles and attempts < 6:
             deflection *= 1.7
+            angular_deflection = min(angular_deflection * 1.3, 1.0)
             attempts += 1
             vertices, triangles = _triangulate(
                 shape, deflection, angular_deflection, remesh
             )
-        resolution = deflection
+        # What the facets actually deviate by, which for a flat-faced part
+        # is nothing at all, however coarse the deflection was.
+        resolution = estimate_facet_resolution(vertices, triangles)
+        candidate_resolution = resolution  # meshed the same way, same error
     else:
         # STL facets cannot be re-meshed; cluster vertices instead, either
         # at the cell the caller asked for or at whatever meets the budget.
@@ -657,13 +680,21 @@ def mesh_shape(
                 attempts += 1
                 clustered = cluster_decimate(vertices, triangles, cluster_cell)
             vertices, triangles = clustered
-        # An as-supplied STL is treated as ground truth: its only error is
-        # whatever the clustering introduced.
-        resolution = cluster_cell
+        # STL facets are themselves an approximation of whatever surface was
+        # exported, so read that chord error off the mesh — a coarsely
+        # exported reference cannot hold the part under test to 0.05 mm.
+        resolution = max(
+            cluster_cell, estimate_facet_resolution(vertices, triangles)
+        )
+        # The part under test is meshed by OCCT at `deflection`, which bounds
+        # its own chord error.
+        candidate_resolution = deflection
 
     data = encode_mesh(vertices, triangles)
     data["deflection"] = round(deflection, 6)
+    data["angular_deflection"] = round(angular_deflection, 6)
     data["resolution"] = round(resolution, 6)
+    data["candidate_resolution"] = round(candidate_resolution, 6)
     data["remeshed"] = remesh
     data["cluster_cell"] = round(cluster_cell, 6)
     data["diagonal"] = round(diag, 4)
@@ -1190,6 +1221,7 @@ def analyze_stl(
     num_angles: int = 12,
     capture_mesh: bool = True,
     mesh_deflection: float | None = None,
+    max_mesh_triangles: int = DEFAULT_MAX_TRIANGLES,
 ) -> dict:
     """Run full geometric analysis on an STL file.
 
@@ -1217,7 +1249,8 @@ def analyze_stl(
               "area": round(va["surface_area"], 4)}]
 
     mesh = (
-        mesh_shape(stl_face, deflection=mesh_deflection, remesh=False)
+        mesh_shape(stl_face, deflection=mesh_deflection, remesh=False,
+                   max_triangles=max_mesh_triangles)
         if capture_mesh else {}
     )
     xs = cross_section_areas_mesh(stl_face, axis=axis, num_slices=num_cross_sections)
@@ -1252,6 +1285,7 @@ def analyze_step(
     num_angles: int = 12,
     capture_mesh: bool = True,
     mesh_deflection: float | None = None,
+    max_mesh_triangles: int = DEFAULT_MAX_TRIANGLES,
 ) -> dict:
     """Run full geometric analysis on a STEP file.
 
@@ -1266,7 +1300,11 @@ def analyze_step(
     faces = face_inventory(shape)
     edges = edge_inventory(shape)
     xs = cross_section_areas(shape, axis=axis, num_slices=num_cross_sections)
-    mesh = mesh_shape(shape, deflection=mesh_deflection) if capture_mesh else {}
+    mesh = (
+        mesh_shape(shape, deflection=mesh_deflection,
+                   max_triangles=max_mesh_triangles)
+        if capture_mesh else {}
+    )
 
     result = {
         "file": str(path),
