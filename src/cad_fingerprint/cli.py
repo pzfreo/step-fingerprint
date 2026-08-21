@@ -25,6 +25,18 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _positive_float(value: str) -> float:
+    """argparse type for lengths that must be greater than zero."""
+    import argparse as _argparse
+
+    number = float(value)
+    if number <= 0:
+        raise _argparse.ArgumentTypeError(
+            f"must be greater than 0, got {number}"
+        )
+    return number
+
+
 def _add_tolerance_args(parser):
     """Add shared tolerance arguments to a parser."""
     parser.add_argument("--volume-tol", type=float, default=1.0,
@@ -73,11 +85,12 @@ def _add_analysis_args(parser):
              "distance (default: 2000)",
     )
     parser.add_argument(
-        "--mesh-deflection", type=float, default=None,
+        "--mesh-deflection", type=_positive_float, default=None,
         help="Surface mesh resolution in mm — the triangulation deflection "
              "for a STEP reference and for the part under test; for an STL "
              "reference, whose facets cannot be re-meshed, the "
-             "vertex-clustering cell (default: bounding-box diagonal / 1000)",
+             "vertex-clustering cell, capped at a third of the part's "
+             "thinnest dimension (default: bounding-box diagonal / 1000)",
     )
     parser.add_argument(
         "--max-mesh-triangles", type=_positive_int, default=12000,

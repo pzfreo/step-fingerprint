@@ -665,6 +665,15 @@ def mesh_shape(
     else:
         # STL facets cannot be re-meshed; cluster vertices instead, either
         # at the cell the caller asked for or at whatever meets the budget.
+        # Clustering at a cell wider than the part's thinnest dimension
+        # snaps opposite walls onto each other and the part loses its
+        # thickness, so that is the hard ceiling — better an over-budget
+        # mesh than a reference that no longer describes the part.
+        thinnest = min(
+            bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z
+        )
+        max_cell = thinnest / 3.0 if thinnest > 0 else float("inf")
+
         cluster_cell = requested or 0.0
         if not cluster_cell and len(triangles) > max_triangles:
             # One cluster per cell, so aim the cell at the edge length a
@@ -672,10 +681,12 @@ def mesh_shape(
             cluster_cell = math.sqrt(
                 2.0 * _mesh_area(vertices, triangles) / max_triangles
             )
+        cluster_cell = min(cluster_cell, max_cell) if cluster_cell else 0.0
         if cluster_cell:
             clustered = cluster_decimate(vertices, triangles, cluster_cell)
             attempts = 0
-            while len(clustered[1]) > max_triangles and attempts < 8:
+            while (len(clustered[1]) > max_triangles and attempts < 8
+                   and cluster_cell * 1.4 <= max_cell):
                 cluster_cell *= 1.4
                 attempts += 1
                 clustered = cluster_decimate(vertices, triangles, cluster_cell)

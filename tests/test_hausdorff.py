@@ -46,6 +46,21 @@ def cube_mesh(size=10.0, offset=(0.0, 0.0, 0.0)):
 UNIT_TRIANGLE = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
 
 
+def _planar_mesh(steps=30, size=100.0):
+    """Flat sheet of triangles in the z=0 plane — zero bounding-box volume."""
+    vertices, triangles = [], []
+    for i in range(steps + 1):
+        for j in range(steps + 1):
+            vertices.append((i * size / steps, j * size / steps, 0.0))
+    row = steps + 1
+    for i in range(steps):
+        for j in range(steps):
+            a = i * row + j
+            triangles.append((a, a + 1, a + row))
+            triangles.append((a + 1, a + row + 1, a + row))
+    return vertices, triangles
+
+
 # ── mesh codec ───────────────────────────────────────────────────────
 
 class TestMeshCodec:
@@ -147,6 +162,35 @@ class TestTriangleGrid:
     def test_empty_grid(self):
         grid = TriangleGrid([], [])
         assert grid.nearest_distance((0.0, 0.0, 0.0)) == float("inf")
+
+    def test_flat_mesh_does_not_explode_the_grid(self):
+        """A zero-thickness mesh has no volume to size cells from.
+
+        Sizing cells by bounding-box volume made every triangle land in
+        thousands of cells; an open or planar STL would exhaust memory.
+        """
+        vertices, triangles = _planar_mesh(steps=30, size=100.0)
+        grid = TriangleGrid(vertices, triangles)
+        entries = sum(len(ids) for ids in grid.cells.values())
+        assert entries < 10 * len(triangles), (
+            f"{entries} grid entries for {len(triangles)} triangles"
+        )
+
+    def test_flat_mesh_still_answers_exactly(self):
+        vertices, triangles = _planar_mesh(steps=12, size=100.0)
+        grid = TriangleGrid(vertices, triangles)
+        tris = [(vertices[i], vertices[j], vertices[k]) for i, j, k in triangles]
+        probes = [
+            (50.0, 50.0, 7.0),     # above the sheet
+            (-30.0, 50.0, 0.0),    # off one edge, in plane
+            (120.0, 120.0, 5.0),   # past a corner
+            (10.0, 90.0, -3.0),    # below the sheet
+        ]
+        for p in probes:
+            expected = math.sqrt(min(
+                _point_triangle_distance2(p, *t) for t in tris
+            ))
+            assert abs(grid.nearest_distance(p) - expected) < 1e-9, p
 
 
 # ── surface sampling ─────────────────────────────────────────────────

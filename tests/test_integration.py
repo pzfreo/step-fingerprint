@@ -583,3 +583,92 @@ class TestCompareMeanTolerance:
                                       hausdorff_samples=500)
         assert result["hausdorff"]["mean_tolerance"] > 0.0001
         assert result["hausdorff"]["resolution_limited"] is True
+
+
+class TestThinPartClustering:
+    """Clustering must never collapse a part's thinnest dimension."""
+
+    def test_plate_keeps_its_thickness(self, tmp_path):
+        from build123d import Box, export_stl
+        from cad_fingerprint.analyze import decoded_mesh, load_stl, mesh_shape
+
+        path = str(tmp_path / "plate.stl")
+        export_stl(Box(200, 200, 1), path)
+        face = load_stl(path)
+
+        # A budget this small would ask for a cell several times the
+        # plate's 1 mm thickness, snapping both faces into one layer.
+        mesh = mesh_shape(face, remesh=False, max_triangles=200)
+        vertices, _ = decoded_mesh(mesh)
+        thickness = max(v[2] for v in vertices) - min(v[2] for v in vertices)
+        assert thickness > 0.5, f"plate flattened to {thickness:.4f} mm"
+        assert mesh["cluster_cell"] <= 1.0 / 3 + 1e-9
+
+    def test_explicit_cell_is_also_capped(self, tmp_path):
+        from build123d import Box, export_stl
+        from cad_fingerprint.analyze import decoded_mesh, load_stl, mesh_shape
+
+        path = str(tmp_path / "plate2.stl")
+        export_stl(Box(200, 200, 1), path)
+        mesh = mesh_shape(load_stl(path), deflection=25.0, remesh=False)
+        vertices, _ = decoded_mesh(mesh)
+        thickness = max(v[2] for v in vertices) - min(v[2] for v in vertices)
+        assert thickness > 0.5
+
+
+class TestCacheSignature:
+    """The generated cache must not confuse two genuinely different parts."""
+
+    def test_mirrored_feature_is_not_a_cache_hit(self, tmp_path):
+        """Same volume, same envelope, feature on the other side.
+
+        Exactly the defect class the surface-deviation test exists to catch,
+        so a cache keyed only on volume and bounding box would hide it.
+        """
+        from build123d import Box, Pos, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        left = Box(40, 20, 10) - (Pos(-15, 0, 0) * Box(6, 6, 12))
+        right = Box(40, 20, 10) - (Pos(15, 0, 0) * Box(6, 6, 12))
+
+        path = str(tmp_path / "left.step")
+        export_step(left, path)
+        source = generate_test_file(CadFingerprint.from_step(path),
+                                    module_name="left")
+        namespace = {}
+        exec(compile(source, "left_test.py", "exec"), namespace)
+
+        signature = namespace["_shape_signature"]
+        assert signature(left) != signature(right), (
+            "mirrored parts share a cache key"
+        )
+        measured = namespace["_hausdorff_vs_reference"](left)
+        mirrored = namespace["_hausdorff_vs_reference"](right)
+        assert mirrored is not measured
+        assert measured["hausdorff"] < 0.01
+        assert mirrored["hausdorff"] > 1.0
+
+
+class TestCliValidation:
+    """Flags that would silently disable the measurement must be rejected."""
+
+    def test_sample_count_must_be_positive(self):
+        import argparse
+        import pytest
+        from cad_fingerprint.cli import _positive_int
+
+        assert _positive_int("2000") == 2000
+        for bad in ("0", "-5"):
+            with pytest.raises(argparse.ArgumentTypeError):
+                _positive_int(bad)
+
+    def test_deflection_must_be_positive(self):
+        import argparse
+        import pytest
+        from cad_fingerprint.cli import _positive_float
+
+        assert _positive_float("0.05") == 0.05
+        for bad in ("0", "-0.1"):
+            with pytest.raises(argparse.ArgumentTypeError):
+                _positive_float(bad)

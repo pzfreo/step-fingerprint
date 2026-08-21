@@ -802,6 +802,7 @@ def _hausdorff_helper_lines() -> list[str]:
     sources = [
         hausdorff.decode_mesh,
         hausdorff._point_triangle_distance2,
+        hausdorff._mesh_area,
         hausdorff.TriangleGrid,
         hausdorff._radical_inverse,
         hausdorff.sample_mesh_points,
@@ -827,12 +828,22 @@ def _hausdorff_helper_lines() -> list[str]:
 
 
     def _shape_signature(shape):
-        """Cheap key identifying a shape's geometry (not its object identity)."""
-        props = GProp_GProps()
-        BRepGProp.VolumeProperties_s(shape.wrapped, props)
+        """Cheap key identifying a shape's geometry (not its object identity).
+
+        Volume and envelope alone would collide on exactly the differences
+        this test exists to catch — a mirrored part, or a feature moved
+        within the same envelope — so the centre of mass and surface area
+        go in too.
+        """
+        volume = GProp_GProps()
+        BRepGProp.VolumeProperties_s(shape.wrapped, volume)
+        surface = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(shape.wrapped, surface)
+        com = volume.CentreOfMass()
         bb = shape.bounding_box()
         return (
-            round(props.Mass(), 9),
+            round(volume.Mass(), 9), round(surface.Mass(), 9),
+            round(com.X(), 9), round(com.Y(), 9), round(com.Z(), 9),
             round(bb.min.X, 9), round(bb.min.Y, 9), round(bb.min.Z, 9),
             round(bb.max.X, 9), round(bb.max.Y, 9), round(bb.max.Z, 9),
         )

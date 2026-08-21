@@ -325,6 +325,19 @@ def _point_triangle_distance2(p, a, b, c) -> float:
     return dx * dx + dy * dy + dz * dz
 
 
+def _mesh_area(tris) -> float:
+    """Total area of a list of (a, b, c) vertex triples."""
+    total = 0.0
+    for a, b, c in tris:
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        total += 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+    return total
+
+
 class TriangleGrid:
     """Uniform spatial grid over a triangle mesh for nearest-surface queries.
 
@@ -354,10 +367,19 @@ class TriangleGrid:
             max(ys) - min(ys) + 2 * pad,
             max(zs) - min(zs) + 2 * pad,
         )
-        volume = max(span[0] * span[1] * span[2], 1e-12)
-        # Aim for ~target_per_cell triangles per occupied cell.
-        n_cells = max(len(self.tris) / target_per_cell, 1.0)
-        self.cell = max((volume / n_cells) ** (1.0 / 3.0), 1e-9)
+        # Size the cell from surface area, not bounding-box volume: the
+        # triangles form a 2D sheet inside the box, and a flat part has no
+        # volume to divide by at all. Occupied cells go as area / cell², so
+        # cell = sqrt(target_per_cell * area / triangle count) puts roughly
+        # target_per_cell triangles in each.
+        area = _mesh_area(self.tris)
+        count = max(len(self.tris), 1)
+        if area > 0.0:
+            self.cell = math.sqrt(target_per_cell * area / count)
+        else:
+            self.cell = max(span) / 8.0
+        # Never so fine that one triangle spans a huge number of cells.
+        self.cell = max(self.cell, max(span) / 512.0, 1e-9)
         self.dims = tuple(max(int(s / self.cell) + 1, 1) for s in span)
         self.max_ring = max(self.dims)
 
