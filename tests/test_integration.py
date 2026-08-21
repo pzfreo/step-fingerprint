@@ -394,8 +394,8 @@ class TestMeshResolutionLimits:
         assert floor > 0.3, "1 mm facets on a 10 mm ball should exceed 0.3 mm"
 
         source = generate_test_file(fp, module_name="coarse")
-        assert "tolerances below were raised" in source
-        assert f"< {floor}," in source
+        assert "Surface-deviation tolerance raised" in source
+        assert f"max({floor}, result" in source
 
         namespace = {}
         exec(compile(source, "coarse_test.py", "exec"), namespace)
@@ -413,8 +413,8 @@ class TestMeshResolutionLimits:
         assert fp.surface_mesh["resolution"] == 0.0
 
         source = generate_test_file(fp, module_name="flat")
-        assert "tolerances below were raised" not in source
-        assert "< 0.3," in source
+        assert "Surface-deviation tolerance raised" not in source
+        assert "max(0.3, result" in source
 
     def test_finer_deflection_tightens_the_angular_limit(self, tmp_path):
         """Asking for a finer mesh has to actually produce a finer one.
@@ -456,9 +456,9 @@ class TestMeshResolutionLimits:
         fp = CadFingerprint.from_step(path)
         source = generate_test_file(fp, module_name="fine")
 
-        assert "tolerances below were raised" not in source
-        assert "< 0.3," in source
-        assert "< 0.05," in source
+        assert "Surface-deviation tolerance raised" not in source
+        assert "max(0.3, result" in source
+        assert "max(0.05, result" in source
 
     def test_stl_facet_error_is_measured(self, tmp_path):
         """A curved STL is itself an approximation — that must be recorded.
@@ -493,7 +493,12 @@ class TestMeshResolutionLimits:
 
         assert clustered["triangle_count"] < as_supplied["triangle_count"]
         assert clustered["cluster_cell"] == 1.5
-        assert clustered["resolution"] == 1.5
+        # Facet error and clustering displacement are independent, so the
+        # reference mesh carries both
+        assert clustered["resolution"] == (
+            1.5 + clustered["facet_error"]
+        )
+        assert clustered["resolution"] > as_supplied["resolution"]
 
     def test_stl_triangle_budget_is_enforced(self, tmp_path):
         from build123d import Sphere, export_stl
@@ -706,7 +711,7 @@ class TestStlFacetError:
         floor = tolerance_floor(fp.surface_mesh)
         assert floor > 2.0
         source = generate_test_file(fp, module_name="ball")
-        assert f"< {floor}," in source
+        assert f"max({floor}, result" in source
         assert "--stl-facet-error" in source
 
 
@@ -798,3 +803,133 @@ class TestCandidateMeshBudget:
         # A far more detailed part must not blow past the ceiling
         result = namespace["_hausdorff_vs_reference"](Sphere(radius=10))
         assert result["hausdorff"] < 1.0
+
+
+class TestHollowPartClustering:
+    """Clustering must not weld a hollow part's inner and outer walls."""
+
+    @staticmethod
+    def _hollow_box(tmp_path, name, outer=100.0, wall=1.0):
+        from build123d import Box, export_stl
+
+        solid = Box(outer, outer, outer) - Box(
+            outer - 2 * wall, outer - 2 * wall, outer - 2 * wall
+        )
+        path = str(tmp_path / f"{name}.stl")
+        export_stl(solid, path)
+        return path, solid.volume
+
+    def test_thin_walls_survive_the_triangle_budget(self, tmp_path):
+        """The part's envelope is 100 mm; only its walls are thin.
+
+        A bounding-box ceiling sees nothing thin here, so the guard has to
+        come from the mesh itself.
+        """
+        from cad_fingerprint.analyze import (
+            _signed_volume, decoded_mesh, load_stl, mesh_shape,
+        )
+
+        path, material = self._hollow_box(tmp_path, "hollow")
+        mesh = mesh_shape(load_stl(path), remesh=False, max_triangles=200)
+        volume = abs(_signed_volume(*decoded_mesh(mesh)))
+        assert abs(volume - material) / material < 0.05, (
+            f"clustering changed the enclosed volume from {material:.0f} to "
+            f"{volume:.0f} mm³ — the walls collapsed"
+        )
+
+    def test_signed_volume_matches_the_solid(self, tmp_path):
+        from cad_fingerprint.analyze import (
+            _signed_volume, _triangulate, load_stl,
+        )
+
+        path, material = self._hollow_box(tmp_path, "hollow2")
+        vertices, triangles = _triangulate(load_stl(path), 0, 0, False)
+        assert abs(abs(_signed_volume(vertices, triangles)) - material) < 1.0
+
+
+class TestCandidateCoarseningTolerance:
+    """Coarsening the candidate mesh has to move the tolerances with it."""
+
+    def test_correct_part_still_passes_after_coarsening(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "coarse_budget.step")
+        export_step(Sphere(radius=10), path)
+        # A tiny budget forces the reference coarse and makes the candidate
+        # mesh hit the ceiling and get coarsened at test time.
+        fp = CadFingerprint.from_step(path, max_mesh_triangles=400)
+        source = generate_test_file(fp, module_name="coarse_budget")
+
+        namespace = {}
+        exec(compile(source, "coarse_budget_test.py", "exec"), namespace)
+        result = namespace["_hausdorff_vs_reference"](Sphere(radius=10))
+        assert result["floor"] > 0.0
+
+        # The part is the reference: both assertions must hold
+        suite = namespace["TestSurfaceDeviation"]()
+        suite.test_max_deviation(Sphere(radius=10))
+        suite.test_mean_deviation(Sphere(radius=10))
+
+    def test_floor_tracks_the_deflection_actually_used(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "floor_track.step")
+        export_step(Sphere(radius=10), path)
+        fp = CadFingerprint.from_step(path, max_mesh_triangles=400)
+        namespace = {}
+        exec(compile(generate_test_file(fp, module_name="ft"),
+                     "ft_test.py", "exec"), namespace)
+
+        result = namespace["_hausdorff_vs_reference"](Sphere(radius=10))
+        # Whatever deflection the candidate ended up meshed at, the floor is
+        # derived from that mesh rather than from the recorded one
+        assert result["deflection"] >= namespace["REF_MESH"]["deflection"]
+        assert result["floor"] >= 2.0 * namespace["REF_MESH"]["resolution"]
+
+
+class TestUnreadableFacetErrorWarning:
+    """The user has to be told when an STL's facet error cannot be read."""
+
+    @staticmethod
+    def _hex_prism_mesh(sides=6, radius=10.0, height=20.0):
+        import math
+
+        vertices, triangles = [], []
+        for i in range(sides):
+            angle = 2 * math.pi * i / sides
+            x, y = radius * math.cos(angle), radius * math.sin(angle)
+            vertices += [(x, y, 0.0), (x, y, height)]
+        for i in range(sides):
+            a, b = 2 * i, 2 * i + 1
+            c = (2 * (i + 1)) % (2 * sides)
+            d = (2 * (i + 1) + 1) % (2 * sides)
+            triangles += [(a, c, b), (b, c, d)]
+        bottom, top = len(vertices), len(vertices) + 1
+        vertices += [(0.0, 0.0, 0.0), (0.0, 0.0, height)]
+        for i in range(sides):
+            triangles.append((bottom, 2 * ((i + 1) % sides), 2 * i))
+            triangles.append((top, 2 * i + 1, 2 * ((i + 1) % sides) + 1))
+        return vertices, triangles
+
+    def test_warns_on_an_unreadable_mesh(self, capsys):
+        from cad_fingerprint.cli import _warn_if_facet_error_unreadable
+        from cad_fingerprint.hausdorff import encode_mesh
+
+        mesh = encode_mesh(*self._hex_prism_mesh())
+        mesh["facet_error"] = 0.0
+        _warn_if_facet_error_unreadable(None, mesh)
+        out = capsys.readouterr().out
+        assert "--stl-facet-error" in out
+
+    def test_silent_when_the_error_was_readable(self, capsys):
+        from cad_fingerprint.cli import _warn_if_facet_error_unreadable
+        from cad_fingerprint.hausdorff import encode_mesh
+
+        mesh = encode_mesh(*self._hex_prism_mesh(sides=64))
+        mesh["facet_error"] = 0.05
+        _warn_if_facet_error_unreadable(None, mesh)
+        assert capsys.readouterr().out == ""

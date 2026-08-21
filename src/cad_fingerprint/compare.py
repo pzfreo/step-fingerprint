@@ -186,6 +186,8 @@ def compare_fingerprints(
             "samples": h["samples"],
             "tolerance": max_tol,
             "mean_tolerance": mean_tol,
+            "requested_tolerance": hausdorff_tol_mm,
+            "requested_mean_tolerance": hausdorff_mean_tol_mm,
             "resolution_limited": (max_tol > hausdorff_tol_mm
                                    or mean_tol > hausdorff_mean_tol_mm),
             "max_status": max_status,
@@ -303,8 +305,16 @@ def format_comparison(result: dict) -> str:
         lines.append(f"    ref→impl {h['forward']:.4f}, impl→ref {h['backward']:.4f}, "
                      f"RMS {h['rms']:.4f}, 95th pct {h['p95']:.4f}")
         if h["resolution_limited"]:
-            lines.append("    (tolerances raised to the mesh resolution — "
-                         "lower --mesh-deflection for a finer check)")
+            raised = []
+            if h["max_status"] is not None and h["tolerance"] > h["requested_tolerance"]:
+                raised.append(f"max {h['requested_tolerance']} → "
+                              f"{h['tolerance']:.4f}")
+            if h["mean_tolerance"] > h["requested_mean_tolerance"]:
+                raised.append(f"mean {h['requested_mean_tolerance']} → "
+                              f"{h['mean_tolerance']:.4f}")
+            lines.append(f"    (raised to the mesh resolution: "
+                         f"{'; '.join(raised)} mm — mesh finer for a "
+                         f"tighter check)")
     else:
         lines.append(f"{_BOLD}Surface Deviation (Hausdorff){_RESET}")
         lines.append("  - not measured: one or both fingerprints have no "

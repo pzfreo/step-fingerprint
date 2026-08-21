@@ -671,42 +671,19 @@ def mesh_shape(
         )
         candidate_resolution = resolution  # meshed the same way, same error
     else:
-        # STL facets cannot be re-meshed; cluster vertices instead, either
-        # at the cell the caller asked for or at whatever meets the budget.
-        # Clustering at a cell wider than the part's thinnest dimension
-        # snaps opposite walls onto each other and the part loses its
-        # thickness, so that is the hard ceiling — better an over-budget
-        # mesh than a reference that no longer describes the part.
-        thinnest = min(
-            bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z
-        )
-        max_cell = thinnest / 3.0 if thinnest > 0 else float("inf")
-
-        cluster_cell = requested or 0.0
-        if not cluster_cell and len(triangles) > max_triangles:
-            # One cluster per cell, so aim the cell at the edge length a
-            # mesh of max_triangles covering this surface would have.
-            cluster_cell = math.sqrt(
-                2.0 * _mesh_area(vertices, triangles) / max_triangles
-            )
-        cluster_cell = min(cluster_cell, max_cell) if cluster_cell else 0.0
-        if cluster_cell:
-            clustered = cluster_decimate(vertices, triangles, cluster_cell)
-            attempts = 0
-            while (len(clustered[1]) > max_triangles and attempts < 8
-                   and cluster_cell * 1.4 <= max_cell):
-                cluster_cell *= 1.4
-                attempts += 1
-                clustered = cluster_decimate(vertices, triangles, cluster_cell)
-            vertices, triangles = clustered
-        # STL facets are themselves an approximation of whatever surface was
-        # exported, so read that chord error off the mesh — a coarsely
-        # exported reference cannot hold the part under test to 0.05 mm.
+        # STL facets cannot be re-meshed, so read their chord error before
+        # touching anything: clustering snaps vertices onto a lattice, which
+        # turns the gentle folds the estimate reads into sharp ones.
         facets = (
             facet_error if facet_error is not None
             else estimate_facet_resolution(vertices, triangles)
         )
-        resolution = max(cluster_cell, facets)
+        vertices, triangles, cluster_cell = _cluster_to_budget(
+            vertices, triangles, bb, requested, max_triangles
+        )
+        # Two independent errors, so they add: how far the facets sat from
+        # the exported surface, plus how far clustering moved them.
+        resolution = facets + cluster_cell
         # The part under test is meshed by OCCT at `deflection`, which bounds
         # its own chord error.
         candidate_resolution = deflection
@@ -718,21 +695,94 @@ def mesh_shape(
     data["candidate_resolution"] = round(candidate_resolution, 6)
     data["remeshed"] = remesh
     data["cluster_cell"] = round(cluster_cell, 6)
+    data["facet_error"] = round(0.0 if remesh else facets, 6)
     data["facet_error_declared"] = facet_error is not None
     data["diagonal"] = round(diag, 4)
     return data
 
 
+def _cluster_to_budget(vertices, triangles, bb, requested, max_triangles):
+    """Cluster an STL mesh down towards the triangle budget.
+
+    Returns (vertices, triangles, cell). Clustering at a cell wider than a
+    wall is thick snaps that wall's two surfaces onto each other, and the
+    reference stops describing the part. A bounding-box ceiling only catches
+    that when the thin feature *is* the whole part, so every candidate cell
+    is checked against the mesh's enclosed volume, which a collapsed wall
+    changes drastically. An over-budget mesh beats a wrong one.
+    """
+    from .hausdorff import cluster_decimate
+
+    thinnest = min(
+        bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z
+    )
+    max_cell = thinnest / 3.0 if thinnest > 0 else float("inf")
+
+    cell = requested or 0.0
+    if not cell and len(triangles) > max_triangles:
+        # One cluster per cell, so aim the cell at the edge length a mesh of
+        # max_triangles covering this surface would have.
+        cell = math.sqrt(2.0 * _mesh_area(vertices, triangles) / max_triangles)
+    if not cell:
+        return vertices, triangles, 0.0
+    cell = min(cell, max_cell)
+
+    reference_volume = abs(_signed_volume(vertices, triangles))
+
+    def distorts(mesh):
+        if reference_volume < 1e-9:
+            return False  # open or flat mesh — no volume to preserve
+        changed = abs(_signed_volume(*mesh))
+        return abs(changed - reference_volume) / reference_volume > 0.05
+
+    clustered = cluster_decimate(vertices, triangles, cell)
+    # Back off until the part survives the clustering.
+    attempts = 0
+    while distorts(clustered) and attempts < 8:
+        cell /= 1.6
+        attempts += 1
+        clustered = cluster_decimate(vertices, triangles, cell)
+    if distorts(clustered):
+        return vertices, triangles, 0.0  # cannot thin this part safely
+
+    # Then coarsen towards the budget for as long as it stays intact.
+    attempts = 0
+    while (len(clustered[1]) > max_triangles and attempts < 8
+           and cell * 1.4 <= max_cell):
+        wider = cluster_decimate(vertices, triangles, cell * 1.4)
+        if distorts(wider):
+            break
+        cell *= 1.4
+        attempts += 1
+        clustered = wider
+    return clustered[0], clustered[1], cell
+
+
+def _signed_volume(vertices, triangles) -> float:
+    """Volume enclosed by a triangle mesh, via the divergence theorem."""
+    total = 0.0
+    for i, j, k in triangles:
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        total += (
+            a[0] * (b[1] * c[2] - b[2] * c[1])
+            - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
+        )
+    return total / 6.0
+
+
 def _measured_resolution(
     shape, vertices, triangles, deflection, angular_deflection,
-    samples: int = 600,
+    max_probes: int = 20000,
 ) -> float:
     """How far a triangulation sits from the surface it approximates, in mm.
 
     Measured, not estimated: the shape is re-meshed several times finer and
-    the stored mesh's sample points are measured against it.
+    the stored mesh is measured against it. Probes are facet centroids —
+    a chord's deviation peaks in the middle of a facet, not at its edges, so
+    scattered sampling reads low — one per triangle up to ``max_probes``.
     """
-    from .hausdorff import TriangleGrid, sample_mesh_points
+    from .hausdorff import TriangleGrid
 
     if not triangles:
         return 0.0
@@ -745,8 +795,18 @@ def _measured_resolution(
     if not fine[1]:
         return 0.0
     grid = TriangleGrid(*fine)
-    points = sample_mesh_points(vertices, triangles, samples)
-    return max((grid.nearest_distance(p) for p in points), default=0.0)
+    stride = max(len(triangles) // max_probes, 1)
+    worst = 0.0
+    for n in range(0, len(triangles), stride):
+        i, j, k = triangles[n]
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        centroid = (
+            (a[0] + b[0] + c[0]) / 3.0,
+            (a[1] + b[1] + c[1]) / 3.0,
+            (a[2] + b[2] + c[2]) / 3.0,
+        )
+        worst = max(worst, grid.nearest_distance(centroid))
+    return worst
 
 
 def _mesh_area(vertices, triangles) -> float:

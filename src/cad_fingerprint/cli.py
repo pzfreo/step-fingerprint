@@ -111,6 +111,30 @@ def _add_analysis_args(parser):
     )
 
 
+def _warn_if_facet_error_unreadable(fp, mesh):
+    """Warn when an STL's facet error cannot be read from the file.
+
+    Past a certain coarseness the folds between facets are indistinguishable
+    from real edges — a hexagonal prism and a six-facet cylinder are the same
+    mesh — and the estimate comes back at zero. If the part is genuinely
+    faceted that is correct; if it approximates curved surfaces it is not,
+    and only the person who exported it knows which.
+    """
+    from .analyze import decoded_mesh
+    from .hausdorff import coarse_fold_fraction
+
+    if mesh["facet_error"] > 0.0:
+        return
+    vertices, triangles = decoded_mesh(mesh)
+    if coarse_fold_fraction(vertices, triangles) < 0.2:
+        return
+    print("  Note: this mesh folds too sharply for its facet error to be "
+          "read. If it\n        approximates curved surfaces, pass "
+          "--stl-facet-error <mm> with the\n        tolerance it was "
+          "exported at, or the generated tests will hold your\n        "
+          "implementation to a tolerance the reference cannot meet.")
+
+
 def _run_analyze(args):
     """Run the fingerprint analysis workflow."""
     cad_path = Path(args.cad_file)
@@ -166,10 +190,17 @@ def _run_analyze(args):
                    + len(fp.surface_mesh["triangles"])) // 1024
         print(f"  Surface mesh: {fp.surface_mesh['triangle_count']} triangles "
               f"at {fp.surface_mesh['deflection']:.4f} mm deflection ({mesh_kb} KB embedded)")
-        if is_stl and not fp.surface_mesh.get("facet_error_declared"):
-            print(f"  STL facet error: {fp.surface_mesh['resolution']:.4f} mm "
-                  f"estimated from the facets — pass --stl-facet-error to "
-                  f"state your export tolerance instead")
+        if is_stl:
+            mesh = fp.surface_mesh
+            source = ("declared" if mesh.get("facet_error_declared")
+                      else "estimated from the facets")
+            print(f"  STL facet error: {mesh['facet_error']:.4f} mm ({source})")
+            if mesh.get("cluster_cell"):
+                print(f"  Clustered to fit the triangle budget: "
+                      f"{mesh['cluster_cell']:.4f} mm cell "
+                      f"(raise --max-mesh-triangles to keep more detail)")
+            if not mesh.get("facet_error_declared"):
+                _warn_if_facet_error_unreadable(fp, mesh)
         if mesh_kb > 250:
             print(f"  Note: that mesh is large for an embedded test file — "
                   f"lower --max-mesh-triangles or raise --mesh-deflection, "

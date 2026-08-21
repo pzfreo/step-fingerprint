@@ -81,11 +81,17 @@ used to shrink an over-large mesh (capped so a thin wall cannot collapse), and
 the triangle budget is met by clustering rather than by re-meshing. A coarsely
 exported STL is itself an approximation of whatever it was exported from, and
 that error is estimated from the facets: each interior edge's turn angle over
-the span perpendicular to it gives the arc those facets approximate. Beyond a
-point the estimate cannot be made at all — a hexagonal prism and a six-facet
-cylinder are the same mesh, and nothing in the file says which was meant — so
-the estimate is printed when you run the tool, and `--stl-facet-error` lets you
-state the export tolerance outright.
+the span perpendicular to it gives the arc those facets approximate. It adds to
+the clustering displacement, since the two are independent. Beyond a point the
+estimate cannot be made at all — a hexagonal prism and a six-facet cylinder are
+the same mesh, and nothing in the file says which was meant — so the tool
+prints what it read, warns when it could not read anything, and
+`--stl-facet-error` lets you state the export tolerance outright.
+
+The floor is re-derived inside the generated test from the mesh the part under
+test actually produced, so an implementation that tessellates far more finely
+than the reference (and therefore gets coarsened to the same triangle ceiling)
+is judged against the resolution it was really measured at.
 
 For STL files, face type classification is unavailable (no analytical surface
 information exists in the mesh); all other measurements work normally. The

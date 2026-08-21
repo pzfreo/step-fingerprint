@@ -676,6 +676,8 @@ def generate_test_file(
             fixture_name, max_tol, mean_tol, fp.surface_mesh,
             raised=(max_tol > hausdorff_tol_mm
                     or mean_tol > hausdorff_mean_tol_mm),
+            requested_max=hausdorff_tol_mm,
+            requested_mean=hausdorff_mean_tol_mm,
         ))
 
     # -- Build quality
@@ -804,6 +806,9 @@ def _hausdorff_helper_lines() -> list[str]:
         hausdorff.decode_mesh,
         hausdorff._point_triangle_distance2,
         hausdorff._mesh_area,
+        hausdorff._distance_to_line,
+        hausdorff._interior_folds,
+        hausdorff.estimate_facet_resolution,
         hausdorff.TriangleGrid,
         hausdorff._radical_inverse,
         hausdorff.sample_mesh_points,
@@ -874,6 +879,15 @@ def _hausdorff_helper_lines() -> list[str]:
             attempts += 1
             actual = _triangulate(shape, deflection, angular, True)
         result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
+        # Coarsening costs accuracy, so the tolerances have to move with it:
+        # what this mesh's own chord error turns out to be decides the floor,
+        # never the deflection the tolerances were written for.
+        scaled = REF_MESH["candidate_resolution"] * (
+            deflection / REF_MESH["deflection"]
+        )
+        candidate_error = max(estimate_facet_resolution(*actual), scaled)
+        result["floor"] = 2.0 * (REF_MESH["resolution"] + candidate_error)
+        result["deflection"] = deflection
         if len(_HAUSDORFF_CACHE) > 4:
             _HAUSDORFF_CACHE.clear()
         _HAUSDORFF_CACHE[key] = result
@@ -888,6 +902,8 @@ def _hausdorff_test_lines(
     mean_tol_mm: float,
     surface_mesh: dict,
     raised: bool = False,
+    requested_max: float = 0.0,
+    requested_mean: float = 0.0,
 ) -> list[str]:
     """Emit the Hausdorff distance test class.
 
@@ -895,7 +911,8 @@ def _hausdorff_test_lines(
         max_tol_mm / mean_tol_mm: tolerances, already floored to what the
             reference mesh can actually resolve.
         surface_mesh: the reference mesh entry, for the explanatory comment.
-        raised: whether mesh resolution forced the tolerances up.
+        raised: whether mesh resolution forced either tolerance up.
+        requested_max / requested_mean: what was asked for, for the note.
     """
     from .hausdorff import mesh_resolution
 
@@ -917,16 +934,20 @@ def _hausdorff_test_lines(
             advice = ("# Re-run with a smaller --mesh-deflection and a larger"
                       " --max-mesh-triangles\n# for a finer reference mesh"
                       " and tighter tolerances.")
+        which = []
+        if max_tol_mm > requested_max:
+            which.append(f"max {requested_max} -> {max_tol_mm} mm")
+        if mean_tol_mm > requested_mean:
+            which.append(f"mean {requested_mean} -> {mean_tol_mm} mm")
         note = [
-            f"# Surface-deviation tolerances below were raised to"
-            f" {max_tol_mm} mm max /",
-            f"# {mean_tol_mm} mm mean, to match the meshing error"
-            f" ({mesh_resolution(surface_mesh):.4f} mm — this",
-            f"# reference mesh plus the mesh the part under test is measured"
-            f" against).",
-            f"# Two triangulations of one surface differ by about that much,"
-            f" so anything",
-            f"# tighter would flag meshing noise as a defect.",
+            f"# Surface-deviation tolerance raised: {'; '.join(which)}.",
+            f"# The meshing error is {mesh_resolution(surface_mesh):.4f} mm"
+            f" — this reference mesh plus",
+            f"# the mesh the part under test is measured against. Two"
+            f" triangulations of one",
+            f"# surface differ by about that much, so anything tighter would"
+            f" flag meshing",
+            f"# noise as a defect.",
         ] + advice.split("\n")
     else:
         note = []
@@ -949,24 +970,27 @@ def _hausdorff_test_lines(
             missed. Raise --hausdorff-samples to sample the surface harder.
             """
             result = _hausdorff_vs_reference({fixture_name})
+            tolerance = max({max_tol_mm}, result["floor"])
             fwd = result["forward"]["max"]
             bwd = result["backward"]["max"]
             side = "missing material" if fwd > bwd else "excess material"
-            assert result["hausdorff"] < {max_tol_mm}, (
+            assert result["hausdorff"] < tolerance, (
                 f"Hausdorff distance {{result['hausdorff']:.4f}}mm exceeds "
-                f"{max_tol_mm}mm over {{result['samples']}} samples/direction "
-                f"(ref→part {{fwd:.4f}}, part→ref {{bwd:.4f}}, "
-                f"95th pct {{result['p95']:.4f}}) — worst area looks like {{side}}"
+                f"{{tolerance:.4f}}mm over {{result['samples']}} "
+                f"samples/direction (ref→part {{fwd:.4f}}, part→ref "
+                f"{{bwd:.4f}}, 95th pct {{result['p95']:.4f}}) — worst area "
+                f"looks like {{side}}"
             )
 
         def test_mean_deviation(self, {fixture_name}):
             """The surfaces agree closely on average, not just at worst case."""
             result = _hausdorff_vs_reference({fixture_name})
-            assert result["mean"] < {mean_tol_mm}, (
+            tolerance = max({mean_tol_mm}, result["floor"] / 4.0)
+            assert result["mean"] < tolerance, (
                 f"Mean surface deviation {{result['mean']:.4f}}mm exceeds "
-                f"{mean_tol_mm}mm (RMS {{result['rms']:.4f}}, 95th pct "
-                f"{{result['p95']:.4f}}) — the whole surface is off, not just a "
-                f"local feature"
+                f"{{tolerance:.4f}}mm (RMS {{result['rms']:.4f}}, 95th pct "
+                f"{{result['p95']:.4f}}) — the whole surface is off, not just "
+                f"a local feature"
             )
     ''').split("\n")
     if note:
