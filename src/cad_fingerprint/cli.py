@@ -243,7 +243,27 @@ def _run_analyze(args):
         print(f"  Prompt file generated: {args.prompt}")
 
     if not args.output and not args.json and not args.prompt:
-        print(fp.to_json())
+        # The mesh blob is tens of thousands of base64 characters; summarise
+        # it rather than burying the fingerprint the user asked to see.
+        print(_summarised_json(fp))
+
+
+def _summarised_json(fp) -> str:
+    """Fingerprint JSON with the encoded mesh replaced by its shape."""
+    import json
+    from dataclasses import asdict
+
+    data = asdict(fp)
+    mesh = data.get("surface_mesh")
+    if mesh and mesh.get("triangle_count"):
+        data["surface_mesh"] = dict(
+            mesh,
+            vertices=f"<{len(mesh['vertices'])} base64 chars, "
+                     f"--json to keep>",
+            triangles=f"<{len(mesh['triangles'])} base64 chars, "
+                      f"--json to keep>",
+        )
+    return json.dumps(data, indent=2)
 
 
 def _run_compare(args):
@@ -288,7 +308,13 @@ def _run_compare(args):
         ),
         mesh_angular_deflection=ref_fp.surface_mesh.get("angular_deflection"),
         max_mesh_triangles=(
-            10 ** 9 if ref_fp.surface_mesh else args.max_mesh_triangles
+            # Room to be more detailed than the reference, but still a cap:
+            # meshing an intricate part at the reference's deflection can
+            # otherwise run into millions of triangles. Same rule the
+            # generated tests apply to the part under test.
+            max(ref_fp.surface_mesh["triangle_count"] * 4, 20000)
+            if ref_fp.surface_mesh.get("triangle_count")
+            else args.max_mesh_triangles
         ),
     )
 

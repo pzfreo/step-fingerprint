@@ -775,94 +775,6 @@ def _mesh_area(tris) -> float:
     return total
 
 
-def _distance_to_line(point, a, b) -> float:
-    """Perpendicular distance from a point to the line through a and b."""
-    dx, dy, dz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
-    length2 = dx * dx + dy * dy + dz * dz
-    if length2 < 1e-24:
-        return 0.0
-    px, py, pz = point[0] - a[0], point[1] - a[1], point[2] - a[2]
-    cx = py * dz - pz * dy
-    cy = pz * dx - px * dz
-    cz = px * dy - py * dx
-    return math.sqrt((cx * cx + cy * cy + cz * cz) / length2)
-
-
-def _interior_folds(vertices, triangles):
-    """Yield (span, turn angle) for every manifold interior edge."""
-    if not triangles:
-        return
-
-    normals = []
-    for i, j, k in triangles:
-        a, b, c = vertices[i], vertices[j], vertices[k]
-        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
-        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
-        nx = uy * vz - uz * vy
-        ny = uz * vx - ux * vz
-        nz = ux * vy - uy * vx
-        length = math.sqrt(nx * nx + ny * ny + nz * nz)
-        normals.append(
-            (nx / length, ny / length, nz / length) if length > 1e-15 else None
-        )
-
-    # Keyed on position, not index: STL facets rarely share vertex indices.
-    def key(index):
-        x, y, z = vertices[index]
-        return (round(x, 6), round(y, 6), round(z, 6))
-
-    edges: dict = {}
-    for t, (i, j, k) in enumerate(triangles):
-        for a, b, opposite in ((i, j, k), (j, k, i), (k, i, j)):
-            ka, kb = key(a), key(b)
-            edge = (ka, kb) if ka <= kb else (kb, ka)
-            edges.setdefault(edge, []).append((t, key(opposite)))
-
-    for (ka, kb), facets in edges.items():
-        if len(facets) != 2:
-            continue  # boundary, or non-manifold — no dihedral to read
-        (t1, p1), (t2, p2) = facets
-        n1, n2 = normals[t1], normals[t2]
-        if n1 is None or n2 is None:
-            continue
-        dot = min(max(n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2], -1.0), 1.0)
-        span = min(
-            _distance_to_line(p1, ka, kb), _distance_to_line(p2, ka, kb)
-        )
-        yield span, math.acos(dot)
-
-
-def estimate_facet_resolution(
-    vertices, triangles, feature_angle_limit: float = 0.7854,
-) -> float:
-    """Estimate how far a triangulation sits from the smooth surface behind it.
-
-    Used for STL, where there is no analytical surface to measure against —
-    the chord error has to be read off the facets themselves. Across a smooth
-    interior edge the two facets turn by an angle ``theta`` over a span ``h``,
-    approximating an arc of radius ``h / theta`` whose chord sits
-    ``h * theta / 8`` inside it. ``h`` is the *smaller* of the two facets'
-    extents perpendicular to the shared edge, so a narrow chamfer band
-    between two broad faces contributes only its own width.
-
-    Folds sharper than ``feature_angle_limit`` are read as real features, not
-    as chord error, and ignored. That is a genuine limit rather than a
-    conservative choice: a hexagonal prism and a six-facet cylinder are the
-    same mesh, and nothing in the file says which was meant. A mesh coarse
-    enough for that ambiguity to matter is reported by
-    :func:`coarse_fold_fraction`, and the caller can state the export
-    tolerance outright instead of estimating it.
-
-    Returns the worst qualifying edge, which is the right pairing for a
-    worst-case Hausdorff tolerance.
-    """
-    worst = 0.0
-    for span, theta in _interior_folds(vertices, triangles):
-        if theta <= feature_angle_limit:
-            worst = max(worst, span * theta / 8.0)
-    return worst
-
-
 class TriangleGrid:
     """Uniform spatial grid over a triangle mesh for nearest-surface queries.
 
@@ -1187,13 +1099,13 @@ def _hausdorff_vs_reference(shape):
         attempts += 1
         actual = _triangulate(shape, deflection, angular, True)
     result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
-    # Coarsening costs accuracy, so the tolerances have to move with it:
-    # what this mesh's own chord error turns out to be decides the floor,
-    # never the deflection the tolerances were written for.
-    scaled = REF_MESH["candidate_resolution"] * (
+    # Coarsening costs accuracy, so the floor has to move with it. Chord
+    # error scales with the deflection the mesh was built at, which is
+    # all this needs: reading it off the candidate's own facets would let
+    # the part under test widen the tolerance it is judged by.
+    candidate_error = REF_MESH["candidate_resolution"] * (
         deflection / REF_MESH["deflection"]
     )
-    candidate_error = max(estimate_facet_resolution(*actual), scaled)
     result["floor"] = 2.0 * (REF_MESH["resolution"] + candidate_error)
     result["deflection"] = deflection
     if len(_HAUSDORFF_CACHE) > 4:

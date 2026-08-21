@@ -1,24 +1,32 @@
 """Unit tests for the Hausdorff distance implementation.
 
-Pure Python — no build123d or OCC needed. Geometry is hand-built so the
-expected distances are known exactly.
+Pure Python — no build123d or OCC needed. The module is loaded straight from
+its file rather than through the package, whose ``__init__`` pulls in OCC, so
+this suite runs anywhere. Geometry is hand-built, so the expected distances
+are known exactly.
 """
 
+import importlib.util
 import math
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from cad_fingerprint.hausdorff import (
-    TriangleGrid,
-    _distance_stats,
-    _point_triangle_distance2,
-    decode_mesh,
-    encode_mesh,
-    hausdorff_distance,
-    sample_mesh_points,
+_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "src", "cad_fingerprint", "hausdorff.py"
 )
+_spec = importlib.util.spec_from_file_location("_hausdorff_standalone", _PATH)
+hausdorff = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(hausdorff)
+
+TriangleGrid = hausdorff.TriangleGrid
+_distance_stats = hausdorff._distance_stats
+_point_triangle_distance2 = hausdorff._point_triangle_distance2
+cluster_decimate = hausdorff.cluster_decimate
+coarse_fold_fraction = hausdorff.coarse_fold_fraction
+decode_mesh = hausdorff.decode_mesh
+encode_mesh = hausdorff.encode_mesh
+estimate_facet_resolution = hausdorff.estimate_facet_resolution
+hausdorff_distance = hausdorff.hausdorff_distance
+sample_mesh_points = hausdorff.sample_mesh_points
 
 
 # ── fixture geometry ─────────────────────────────────────────────────
@@ -307,13 +315,11 @@ class TestHausdorffDistance:
 class TestFacetResolution:
     def test_flat_mesh_has_no_chord_error(self):
         """A cube's facets are exact; its 90° edges are features, not error."""
-        from cad_fingerprint.hausdorff import estimate_facet_resolution
 
         assert estimate_facet_resolution(*cube_mesh(size=10.0)) == 0.0
 
     def test_faceted_cylinder_error_tracks_the_facet_size(self):
         """Chord error of an n-gon prism approximating a cylinder: r(1-cos(pi/n))."""
-        from cad_fingerprint.hausdorff import estimate_facet_resolution
 
         def prism(sides, radius=10.0, height=4.0):
             vertices, triangles = [], []
@@ -339,7 +345,6 @@ class TestFacetResolution:
             )
 
     def test_finer_facets_estimate_a_smaller_error(self):
-        from cad_fingerprint.hausdorff import estimate_facet_resolution
 
         def dome(steps, radius=10.0):
             vertices, triangles = [], []
@@ -365,14 +370,12 @@ class TestFacetResolution:
         assert fine < coarse / 3
 
     def test_empty_mesh(self):
-        from cad_fingerprint.hausdorff import estimate_facet_resolution
 
         assert estimate_facet_resolution([], []) == 0.0
 
 
 class TestClusterDecimate:
     def test_reduces_a_dense_mesh(self):
-        from cad_fingerprint.hausdorff import cluster_decimate
 
         vertices, triangles = cube_mesh(size=10.0)
         # Subdivide-free stand-in: many cubes' worth of coincident geometry
@@ -381,7 +384,6 @@ class TestClusterDecimate:
         assert len(t2) <= len(triangles)
 
     def test_moves_vertices_by_less_than_the_cell(self):
-        from cad_fingerprint.hausdorff import TriangleGrid, cluster_decimate
 
         vertices, triangles = cube_mesh(size=10.0)
         cell = 1.0
@@ -391,7 +393,6 @@ class TestClusterDecimate:
             assert grid.nearest_distance(p) < cell * math.sqrt(3)
 
     def test_zero_cell_is_a_no_op(self):
-        from cad_fingerprint.hausdorff import cluster_decimate
 
         vertices, triangles = cube_mesh()
         assert cluster_decimate(vertices, triangles, 0.0) == (vertices, triangles)
@@ -416,18 +417,15 @@ class TestCoarseFoldFraction:
     """Signals when facet folds are too sharp to read as chord error."""
 
     def test_flat_mesh_has_no_sharp_interior_folds(self):
-        from cad_fingerprint.hausdorff import coarse_fold_fraction
 
         assert coarse_fold_fraction(*_planar_mesh(steps=8)) == 0.0
 
     def test_cube_is_all_sharp_folds(self):
-        from cad_fingerprint.hausdorff import coarse_fold_fraction
 
         # Every non-diagonal edge of a cube turns by 90°
         assert coarse_fold_fraction(*cube_mesh()) > 0.5
 
     def test_empty_mesh(self):
-        from cad_fingerprint.hausdorff import coarse_fold_fraction
 
         assert coarse_fold_fraction([], []) == 0.0
 
@@ -456,7 +454,6 @@ class TestFacetResolutionAccuracy:
         return vertices, triangles
 
     def test_matches_analytic_chord_error(self):
-        from cad_fingerprint.hausdorff import estimate_facet_resolution
 
         for sides in (8, 12, 24, 48, 96):
             estimate = estimate_facet_resolution(*self._prism(sides))
@@ -471,7 +468,6 @@ class TestFacetResolutionAccuracy:
         Measuring the span across the *broad* face would report a chord
         error the size of the whole part.
         """
-        from cad_fingerprint.hausdorff import estimate_facet_resolution
 
         # Two 50 mm faces meeting through a 0.5 mm chamfer band at 30°
         vertices = [

@@ -806,9 +806,6 @@ def _hausdorff_helper_lines() -> list[str]:
         hausdorff.decode_mesh,
         hausdorff._point_triangle_distance2,
         hausdorff._mesh_area,
-        hausdorff._distance_to_line,
-        hausdorff._interior_folds,
-        hausdorff.estimate_facet_resolution,
         hausdorff.TriangleGrid,
         hausdorff._radical_inverse,
         hausdorff.sample_mesh_points,
@@ -879,13 +876,13 @@ def _hausdorff_helper_lines() -> list[str]:
             attempts += 1
             actual = _triangulate(shape, deflection, angular, True)
         result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
-        # Coarsening costs accuracy, so the tolerances have to move with it:
-        # what this mesh's own chord error turns out to be decides the floor,
-        # never the deflection the tolerances were written for.
-        scaled = REF_MESH["candidate_resolution"] * (
+        # Coarsening costs accuracy, so the floor has to move with it. Chord
+        # error scales with the deflection the mesh was built at, which is
+        # all this needs: reading it off the candidate's own facets would let
+        # the part under test widen the tolerance it is judged by.
+        candidate_error = REF_MESH["candidate_resolution"] * (
             deflection / REF_MESH["deflection"]
         )
-        candidate_error = max(estimate_facet_resolution(*actual), scaled)
         result["floor"] = 2.0 * (REF_MESH["resolution"] + candidate_error)
         result["deflection"] = deflection
         if len(_HAUSDORFF_CACHE) > 4:
@@ -920,7 +917,7 @@ def _hausdorff_test_lines(
         clustered = (
             not surface_mesh.get("remeshed", True)
             and surface_mesh.get("cluster_cell", 0.0)
-            >= surface_mesh.get("resolution", 0.0)
+            >= surface_mesh.get("facet_error", 0.0)
         )
         if clustered:
             # The reference STL was thinned to fit the triangle budget, so a

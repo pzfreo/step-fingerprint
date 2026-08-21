@@ -933,3 +933,130 @@ class TestUnreadableFacetErrorWarning:
         mesh["facet_error"] = 0.05
         _warn_if_facet_error_unreadable(None, mesh)
         assert capsys.readouterr().out == ""
+
+
+class TestToleranceIsNotSelfReferential:
+    """The part under test must not be able to widen its own tolerance."""
+
+    def test_candidate_features_do_not_inflate_the_floor(self, tmp_path):
+        """A chamfered candidate is a deviation, not extra mesh resolution.
+
+        Reading chord error off the candidate's own facets let a shallow
+        feature raise the tolerance until a genuinely wrong part passed.
+        """
+        import pytest
+        from build123d import Box, chamfer, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "plain.step")
+        plain = Box(20, 20, 20)
+        export_step(plain, path)
+        fp = CadFingerprint.from_step(path)
+        namespace = {}
+        exec(compile(generate_test_file(fp, module_name="plain"),
+                     "plain_test.py", "exec"), namespace)
+
+        chamfered = chamfer(Box(20, 20, 20).edges(), length=1.5)
+
+        plain_floor = namespace["_hausdorff_vs_reference"](plain)["floor"]
+        chamfered_result = namespace["_hausdorff_vs_reference"](chamfered)
+        assert chamfered_result["floor"] == plain_floor, (
+            "the candidate's own features changed the tolerance"
+        )
+
+        suite = namespace["TestSurfaceDeviation"]()
+        with pytest.raises(AssertionError):
+            suite.test_max_deviation(chamfered)
+
+
+class TestGeneratedAdvice:
+    """The 'how to tighten this' advice has to name the knob that works."""
+
+    @staticmethod
+    def _source_for(tmp_path, **mesh_overrides):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "advice.step")
+        export_step(Sphere(radius=10), path)
+        fp = CadFingerprint.from_step(path, mesh_deflection=1.0)
+        fp.surface_mesh = dict(fp.surface_mesh, **mesh_overrides)
+        return generate_test_file(fp, module_name="advice")
+
+    def test_clustered_stl_is_told_to_raise_the_budget(self, tmp_path):
+        source = self._source_for(
+            tmp_path, remeshed=False, cluster_cell=0.9, facet_error=0.2,
+        )
+        assert "--max-mesh-triangles" in source
+        assert "Export the STL more finely" not in source
+
+    def test_faceted_stl_is_told_to_export_finer(self, tmp_path):
+        source = self._source_for(
+            tmp_path, remeshed=False, cluster_cell=0.0, facet_error=0.9,
+        )
+        assert "Export the STL more finely" in source
+        assert "--stl-facet-error" in source
+
+
+class TestStdoutSummary:
+    """The default stdout dump stays readable."""
+
+    def test_mesh_blob_is_summarised(self, tmp_path):
+        import json
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.cli import _summarised_json
+
+        path = str(tmp_path / "dump.step")
+        export_step(Sphere(radius=10), path)   # thousands of triangles
+        fp = CadFingerprint.from_step(path)
+
+        summarised = json.loads(_summarised_json(fp))
+        mesh = summarised["surface_mesh"]
+        assert "base64 chars" in mesh["vertices"]
+        assert mesh["triangle_count"] == fp.surface_mesh["triangle_count"]
+        assert len(_summarised_json(fp)) < len(fp.to_json()) / 2
+
+    def test_full_json_still_carries_the_mesh(self, tmp_path):
+        import json
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+
+        path = str(tmp_path / "dump2.step")
+        export_step(Box(10, 20, 30), path)
+        fp = CadFingerprint.from_step(path)
+        assert json.loads(fp.to_json())["surface_mesh"]["vertices"] == \
+            fp.surface_mesh["vertices"]
+
+
+class TestCompareMeshBudget:
+    """compare caps the implementation mesh instead of meshing without limit."""
+
+    def test_implementation_mesh_is_bounded(self, tmp_path, capsys):
+        import argparse
+        from build123d import Sphere, export_step
+        from cad_fingerprint.cli import _run_compare
+
+        ref_path = str(tmp_path / "cmp_ref.step")
+        impl_path = str(tmp_path / "cmp_impl.step")
+        export_step(Sphere(radius=10), ref_path)
+        export_step(Sphere(radius=10.02), impl_path)
+
+        args = argparse.Namespace(
+            ref_step=ref_path, impl_step=impl_path, axis="Z",
+            cross_sections=6, radial_slices=4, angles=6,
+            volume_tol=1.0, area_tol=2.0, bbox_tol=0.1, inertia_tol=2.0,
+            xs_area_tol=3.0, xs_centroid_tol=0.2, xs_moment_tol=5.0,
+            radial_tol=0.15, hausdorff_tol=0.3, hausdorff_mean_tol=0.05,
+            hausdorff_samples=300, mesh_deflection=None,
+            max_mesh_triangles=800, no_hausdorff=False,
+            stl_facet_error=None,
+        )
+        try:
+            _run_compare(args)
+        except SystemExit:
+            pass  # non-zero exit on a failing metric is expected
+        out = capsys.readouterr().out
+        assert "Surface Deviation" in out
