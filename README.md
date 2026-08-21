@@ -60,6 +60,20 @@ self-contained. Two assertions are generated: worst-case deviation
 (`--hausdorff-mean-tol`, default 0.05 mm). Pass `--no-hausdorff` to skip the
 mesh capture and both tests.
 
+Both are sampled estimates — 2000 points per direction by default, so a defect
+confined to a few triangles can slip through; raise `--hausdorff-samples` to
+sample harder. Tolerances are also floored at twice the mesh resolution,
+because two triangulations of the *same* surface differ by about that much. A
+large or intricate part whose mesh gets coarsened to fit the triangle budget
+therefore gets looser assertions and a comment in the generated file saying so,
+rather than assertions it cannot meet. Lower `--mesh-deflection` for a finer
+(and larger) reference mesh.
+
+For an STL reference the facets are used as supplied — there is no analytical
+surface to re-mesh — so `--mesh-deflection` becomes the vertex-clustering cell
+used to shrink an over-large mesh, and the triangle budget is met by clustering
+rather than by re-meshing.
+
 For STL files, face type classification is unavailable (no analytical surface
 information exists in the mesh); all other measurements work normally. The
 radial profile uses direct Möller-Trumbore ray-triangle intersection (rather
@@ -106,7 +120,7 @@ Options:
 | `--radial-slices` | 15 | Number of axial positions for radial profile |
 | `--angles` | 12 | Angular samples per radial position |
 | `--hausdorff-samples` | 2000 | Surface sample points per direction |
-| `--mesh-deflection` | diagonal/1000 | Triangulation deflection for the reference mesh |
+| `--mesh-deflection` | diagonal/1000 | Reference mesh resolution — deflection (STEP) or clustering cell (STL) |
 | `--no-hausdorff` | — | Skip the surface mesh and Hausdorff tests |
 
 Tolerance flags (all have sensible defaults):
@@ -188,11 +202,12 @@ OCP bindings) directly:
   intersection radius at each angle. For STL: uses Möller-Trumbore
   ray-triangle intersection from the bounding-box centre to handle parts not
   aligned with the world origin.
-- **Surface deviation** — triangulates the shape with `BRepMesh_IncrementalMesh`
-  (STL meshes are used as supplied), samples points over the surface
-  area-weighted with a deterministic low-discrepancy sequence, and measures
-  point-to-triangle distances through a uniform spatial grid. No RNG is
-  involved, so the same input always yields the same numbers.
+- **Surface deviation** — triangulates a *copy* of the shape with
+  `BRepMesh_IncrementalMesh` (STL meshes are used as supplied, vertex-clustered
+  if over budget), samples points over the surface area-weighted with a
+  deterministic low-discrepancy sequence, and measures point-to-triangle
+  distances through a uniform spatial grid. No RNG is involved and the input
+  shape is never mutated, so the same input always yields the same numbers.
 - **Build quality** — `ShapeAnalysis_FreeBounds` for free/non-manifold edges;
   `BRepCheck_Analyzer` for invalid geometry; minimum wall thickness via
   ray-sampling.

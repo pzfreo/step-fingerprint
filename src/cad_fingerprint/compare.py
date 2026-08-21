@@ -47,6 +47,7 @@ def compare_fingerprints(
     cross_section_centroid_tol_mm: float = 0.2,
     radial_tol_mm: float = 0.15,
     hausdorff_tol_mm: float = 0.3,
+    hausdorff_mean_tol_mm: float = 0.05,
     hausdorff_samples: int = 2000,
 ) -> dict:
     """Compare two fingerprints and return structured results.
@@ -154,16 +155,27 @@ def compare_fingerprints(
     results["radial_profile"] = rp_results
 
     # Hausdorff distance — needs the surface mesh from both fingerprints.
-    if ref.surface_mesh and actual.surface_mesh:
+    if ref.surface_mesh.get("triangle_count") and actual.surface_mesh.get(
+        "triangle_count"
+    ):
         from .analyze import decoded_mesh
-        from .hausdorff import hausdorff_distance
+        from .hausdorff import hausdorff_distance, tolerance_floor
 
         h = hausdorff_distance(
             decoded_mesh(ref.surface_mesh),
             decoded_mesh(actual.surface_mesh),
             samples=hausdorff_samples,
         )
-        s, _ = _status(h["hausdorff"], 0.0, hausdorff_tol_mm, is_absolute=True)
+        # Neither mesh can resolve a deviation smaller than its own
+        # triangulation error, so never grade below that floor.
+        floor = max(tolerance_floor(ref.surface_mesh),
+                    tolerance_floor(actual.surface_mesh))
+        max_tol = max(hausdorff_tol_mm, floor)
+        mean_tol = max(hausdorff_mean_tol_mm, floor / 4.0)
+        max_status, _ = _status(h["hausdorff"], 0.0, max_tol, is_absolute=True)
+        mean_status, _ = _status(h["mean"], 0.0, mean_tol, is_absolute=True)
+        rank = {"pass": 0, "close": 1, "fail": 2}
+        worst = max((max_status, mean_status), key=lambda st: rank[st])
         results["hausdorff"] = {
             "max": h["hausdorff"],
             "forward": h["forward"]["max"],
@@ -172,8 +184,12 @@ def compare_fingerprints(
             "rms": h["rms"],
             "p95": h["p95"],
             "samples": h["samples"],
-            "tolerance": hausdorff_tol_mm,
-            "status": s,
+            "tolerance": max_tol,
+            "mean_tolerance": mean_tol,
+            "resolution_limited": floor > hausdorff_tol_mm,
+            "max_status": max_status,
+            "mean_status": mean_status,
+            "status": worst,
         }
 
     # Summary
@@ -275,12 +291,19 @@ def format_comparison(result: dict) -> str:
     # Hausdorff distance
     if "hausdorff" in result:
         h = result["hausdorff"]
-        sym = _colored(h["status"], _STATUS_SYMBOLS[h["status"]])
+        max_sym = _colored(h["max_status"], _STATUS_SYMBOLS[h["max_status"]])
+        mean_sym = _colored(h["mean_status"], _STATUS_SYMBOLS[h["mean_status"]])
         lines.append(f"{_BOLD}Surface Deviation (Hausdorff){_RESET}")
-        lines.append(f"  {sym} max {h['max']:.4f} mm "
-                     f"(tolerance {h['tolerance']} mm, {h['samples']} samples/direction)")
+        lines.append(f"  {max_sym} max {h['max']:.4f} mm "
+                     f"(tolerance {h['tolerance']:.4f} mm, "
+                     f"{h['samples']} samples/direction)")
+        lines.append(f"  {mean_sym} mean {h['mean']:.4f} mm "
+                     f"(tolerance {h['mean_tolerance']:.4f} mm)")
         lines.append(f"    ref→impl {h['forward']:.4f}, impl→ref {h['backward']:.4f}, "
-                     f"mean {h['mean']:.4f}, 95th pct {h['p95']:.4f}")
+                     f"RMS {h['rms']:.4f}, 95th pct {h['p95']:.4f}")
+        if h["resolution_limited"]:
+            lines.append("    (tolerances raised to the mesh resolution — "
+                         "lower --mesh-deflection for a finer check)")
 
     # Summary
     lines.append("")

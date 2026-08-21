@@ -109,6 +109,71 @@ def decode_mesh(payload: dict) -> tuple[list, list]:
     return vertices, triangles
 
 
+
+def cluster_decimate(vertices, triangles, cell: float) -> tuple[list, list]:
+    """Reduce a mesh by snapping vertices to a grid of size ``cell``.
+
+    Used for STL references that are too dense to embed in a test file: the
+    facets cannot be re-meshed (there is no analytical surface behind them),
+    so vertices are clustered instead. Every vertex moves by at most
+    ``cell * sqrt(3) / 2`` and triangles that collapse to a line or a point
+    are dropped, so the decimated surface stays within roughly ``cell`` of
+    the original — which is why callers fold ``cell`` into the mesh
+    resolution they report.
+    """
+    if cell <= 0.0 or not triangles:
+        return vertices, triangles
+
+    index_of = {}
+    new_vertices = []
+    remap = []
+    for x, y, z in vertices:
+        key = (int(math.floor(x / cell)), int(math.floor(y / cell)),
+               int(math.floor(z / cell)))
+        idx = index_of.get(key)
+        if idx is None:
+            idx = len(new_vertices)
+            index_of[key] = idx
+            new_vertices.append((
+                (key[0] + 0.5) * cell, (key[1] + 0.5) * cell,
+                (key[2] + 0.5) * cell,
+            ))
+        remap.append(idx)
+
+    new_triangles = []
+    seen = set()
+    for i, j, k in triangles:
+        a, b, c = remap[i], remap[j], remap[k]
+        if a == b or b == c or a == c:
+            continue  # collapsed into a line or a point
+        key = tuple(sorted((a, b, c)))
+        if key in seen:
+            continue
+        seen.add(key)
+        new_triangles.append((a, b, c))
+    return new_vertices, new_triangles
+
+
+def mesh_resolution(surface_mesh: dict) -> float:
+    """How far a stored mesh may sit from the surface it represents, in mm.
+
+    Two independent triangulations of the same surface can differ by about
+    twice this, which is the floor below which a Hausdorff tolerance cannot
+    distinguish a real defect from meshing noise.
+    """
+    if not surface_mesh:
+        return 0.0
+    return max(
+        surface_mesh.get("resolution", 0.0),
+        surface_mesh.get("deflection", 0.0),
+    )
+
+
+def tolerance_floor(surface_mesh: dict) -> float:
+    """Smallest deviation a mesh of this resolution can meaningfully resolve."""
+    return 2.0 * mesh_resolution(surface_mesh)
+
+
 # ── point ↔ triangle distance ────────────────────────────────────────
 
 

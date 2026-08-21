@@ -128,6 +128,7 @@ REF_MESH = {
     "bbox_max": (47.997517, 53.000000, 71.049995),
     "index_bits": 16,
     "deflection": 0.060137,
+    "resolution": 0.0,
     "vertices": (
         "eNolmHlcTfkbx0/IvswwVPd27q1bd7/dixHGNIxhMIMZqRTJlHYphaKkkKQs5bbetmOJEhpj"
         "J7/BJEYmW1lH9kpjIlvjrt/f91P/PK/7es45z/d5Ps/7+3zPuWoBITbhBwYQMkHk15+QKslD"
@@ -975,21 +976,29 @@ def hausdorff_distance(mesh_a, mesh_b, samples: int = 2000) -> dict:
 
 
 def _triangulate(shape, deflection, angular_deflection, remesh):
-    """Return (vertices, triangles) for a shape, meshing it first if asked."""
+    """Return (vertices, triangles) for a shape, meshing it first if asked.
+
+    Meshing writes a triangulation into the shape, so a copy is meshed and
+    the caller's shape is left exactly as it was — generated tests must not
+    mutate the fixture they are handed.
+    """
     from OCP.BRep import BRep_Tool
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.BRepTools import BRepTools
     from OCP.TopLoc import TopLoc_Location
 
+    target = shape.wrapped
     if remesh:
-        BRepTools.Clean_s(shape.wrapped)
+        target = BRepBuilderAPI_Copy(target).Shape()
+        BRepTools.Clean_s(target)
         BRepMesh_IncrementalMesh(
-            shape.wrapped, deflection, False, angular_deflection, True
+            target, deflection, False, angular_deflection, True
         )
 
     vertices: list = []
     triangles: list = []
-    explorer = TopExp_Explorer(shape.wrapped, TopAbs_FACE)
+    explorer = TopExp_Explorer(target, TopAbs_FACE)
     while explorer.More():
         face = TopoDS.Face_s(explorer.Current())
         loc = TopLoc_Location()
@@ -1015,19 +1024,35 @@ def _triangulate(shape, deflection, angular_deflection, remesh):
 _HAUSDORFF_CACHE = {}
 
 
+def _shape_signature(shape):
+    """Cheap key identifying a shape's geometry (not its object identity)."""
+    props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape.wrapped, props)
+    bb = shape.bounding_box()
+    return (
+        round(props.Mass(), 9),
+        round(bb.min.X, 9), round(bb.min.Y, 9), round(bb.min.Z, 9),
+        round(bb.max.X, 9), round(bb.max.Y, 9), round(bb.max.Z, 9),
+    )
+
+
 def _hausdorff_vs_reference(shape):
     """Two-sided surface deviation between `shape` and the reference mesh.
 
-    Cached per part object so the max/mean tests share one computation.
+    Keyed on the shape's geometry rather than on `id()`, because a
+    function-scoped pytest fixture hands each test a freshly built part —
+    the max and mean tests would otherwise pay for the whole measurement
+    twice.
     """
-    cached = _HAUSDORFF_CACHE.get(id(shape))
-    if cached is not None:
-        return cached[1]
+    key = _shape_signature(shape)
+    if key in _HAUSDORFF_CACHE:
+        return _HAUSDORFF_CACHE[key]
     reference = decode_mesh(REF_MESH)
     actual = _triangulate(shape, REF_MESH["deflection"], 0.35, True)
     result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
-    # keep a reference to `shape` so its id cannot be reused
-    _HAUSDORFF_CACHE[id(shape)] = (shape, result)
+    if len(_HAUSDORFF_CACHE) > 4:
+        _HAUSDORFF_CACHE.clear()
+    _HAUSDORFF_CACHE[key] = result
     return result
 
 
@@ -1198,14 +1223,21 @@ class TestSurfaceDeviation:
     """
 
     def test_max_deviation(self, part_under_test):
-        """No point on either surface is further than the tolerance away."""
+        """No sampled point on either surface is further than the tolerance.
+
+        This is a sampled estimate, not a proof: with HAUSDORFF_SAMPLES
+        points per direction against 3402
+        reference triangles, a defect confined to a few triangles can be
+        missed. Raise --hausdorff-samples to sample the surface harder.
+        """
         result = _hausdorff_vs_reference(part_under_test)
         fwd = result["forward"]["max"]
         bwd = result["backward"]["max"]
         side = "missing material" if fwd > bwd else "excess material"
         assert result["hausdorff"] < 0.3, (
             f"Hausdorff distance {result['hausdorff']:.4f}mm exceeds "
-            f"0.3mm (ref→part {fwd:.4f}, part→ref {bwd:.4f}, "
+            f"0.3mm over {result['samples']} samples/direction "
+            f"(ref→part {fwd:.4f}, part→ref {bwd:.4f}, "
             f"95th pct {result['p95']:.4f}) — worst area looks like {side}"
         )
 

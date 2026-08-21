@@ -270,12 +270,50 @@ class TestGeneratedHausdorffTests:
         # 0.8 mm longer, centred — each end face is 0.4 mm out
         assert abs(result["hausdorff"] - 0.4) < 0.02
 
-    def test_results_are_cached_per_part(self, generated):
+    def test_results_are_cached_across_fixture_rebuilds(self, generated):
+        """A function-scoped fixture rebuilds the part for every test.
+
+        The cache has to key on geometry, not object identity, or the max and
+        mean tests each pay for the whole measurement.
+        """
         from build123d import Box
 
+        first = generated["_hausdorff_vs_reference"](Box(10, 20, 30))
+        second = generated["_hausdorff_vs_reference"](Box(10, 20, 30))
+        assert second is first
+
+    def test_cache_distinguishes_different_parts(self, generated):
+        from build123d import Box
+
+        same = generated["_hausdorff_vs_reference"](Box(10, 20, 30))
+        other = generated["_hausdorff_vs_reference"](Box(10, 20, 30.8))
+        assert other is not same
+        assert other["hausdorff"] > same["hausdorff"]
+
+    def test_fixture_part_is_not_mutated(self, generated):
+        """Meshing the part under test must not alter the caller's shape."""
+        from build123d import Box
+        from OCP.BRep import BRep_Tool
+        from OCP.TopAbs import TopAbs_FACE
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopLoc import TopLoc_Location
+        from OCP.TopoDS import TopoDS
+
         part = Box(10, 20, 30)
-        first = generated["_hausdorff_vs_reference"](part)
-        assert generated["_hausdorff_vs_reference"](part) is first
+
+        def triangulated_faces():
+            count = 0
+            explorer = TopExp_Explorer(part.wrapped, TopAbs_FACE)
+            while explorer.More():
+                face = TopoDS.Face_s(explorer.Current())
+                if BRep_Tool.Triangulation_s(face, TopLoc_Location()) is not None:
+                    count += 1
+                explorer.Next()
+            return count
+
+        before = triangulated_faces()
+        generated["_hausdorff_vs_reference"](part)
+        assert triangulated_faces() == before
 
 
 class TestCompareHausdorff:
@@ -335,3 +373,134 @@ class TestCompareHausdorff:
         result = compare_fingerprints(ref, impl)
         assert "hausdorff" not in result
         assert "Hausdorff" not in format_comparison(result)
+
+
+class TestMeshResolutionLimits:
+    """Mesh resolution has to bound what the generated tolerances claim."""
+
+    def test_coarse_reference_raises_the_tolerances(self, tmp_path):
+        """A mesh too coarse to resolve 0.3 mm must not assert 0.3 mm."""
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "coarse.step")
+        export_step(Box(10, 20, 30), path)
+        fp = CadFingerprint.from_step(path, mesh_deflection=1.0)
+        source = generate_test_file(fp, module_name="coarse")
+
+        assert "raised to match the reference" in source
+        namespace = {}
+        exec(compile(source, "coarse_test.py", "exec"), namespace)
+        # deflection 1.0 → floor 2.0 mm, well above the 0.3 mm default
+        assert "< 2.0," in source
+        assert namespace["REF_MESH"]["resolution"] == 1.0
+
+    def test_fine_reference_keeps_the_requested_tolerances(self, tmp_path):
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "fine.step")
+        export_step(Box(10, 20, 30), path)
+        fp = CadFingerprint.from_step(path)
+        source = generate_test_file(fp, module_name="fine")
+
+        assert "raised to match the reference" not in source
+        assert "< 0.3," in source
+        assert "< 0.05," in source
+
+    def test_stl_deflection_clusters_the_reference_mesh(self, tmp_path):
+        """--mesh-deflection has to do something for STL, not silently pass."""
+        from build123d import Sphere, export_stl
+        from cad_fingerprint.analyze import analyze_stl
+
+        path = str(tmp_path / "ball.stl")
+        export_stl(Sphere(radius=10), path, tolerance=0.01)
+
+        as_supplied = analyze_stl(path)["surface_mesh"]
+        clustered = analyze_stl(path, mesh_deflection=1.5)["surface_mesh"]
+
+        assert clustered["triangle_count"] < as_supplied["triangle_count"]
+        assert clustered["cluster_cell"] == 1.5
+        assert clustered["resolution"] == 1.5
+        assert as_supplied["resolution"] == 0.0   # facets are ground truth
+
+    def test_stl_triangle_budget_is_enforced(self, tmp_path):
+        from build123d import Sphere, export_stl
+        from cad_fingerprint.analyze import decoded_mesh, load_stl, mesh_shape
+        from cad_fingerprint.hausdorff import hausdorff_distance
+
+        path = str(tmp_path / "dense.stl")
+        export_stl(Sphere(radius=10), path, tolerance=0.005)
+        face = load_stl(path)
+
+        full = mesh_shape(face, remesh=False, max_triangles=10**9)
+        capped = mesh_shape(face, remesh=False, max_triangles=1500)
+        assert full["triangle_count"] > 1500
+        assert capped["triangle_count"] <= 1500
+
+        # Decimation must stay within the resolution it reports
+        deviation = hausdorff_distance(
+            decoded_mesh(full), decoded_mesh(capped), samples=800,
+        )
+        assert deviation["hausdorff"] < capped["resolution"] * 2
+
+
+class TestEmptyMesh:
+    """A shape with no triangulation must degrade gracefully, not report inf."""
+
+    def test_generator_skips_an_empty_mesh(self, tmp_path):
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "empty.step")
+        export_step(Box(10, 20, 30), path)
+        fp = CadFingerprint.from_step(path)
+        fp.surface_mesh = {"encoding": "q16", "vertex_count": 0,
+                           "triangle_count": 0, "bbox_min": (0.0, 0.0, 0.0),
+                           "bbox_max": (0.0, 0.0, 0.0), "index_bits": 16,
+                           "vertices": "", "triangles": "", "deflection": 0.1,
+                           "resolution": 0.1}
+        source = generate_test_file(fp, module_name="empty")
+        assert "REF_MESH" not in source
+        assert "TestSurfaceDeviation" not in source
+
+    def test_compare_skips_an_empty_mesh(self, tmp_path):
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.compare import compare_fingerprints
+
+        path = str(tmp_path / "cmp.step")
+        export_step(Box(10, 20, 30), path)
+        ref = CadFingerprint.from_step(path)
+        impl = CadFingerprint.from_step(path)
+        impl.surface_mesh = dict(impl.surface_mesh, triangle_count=0)
+        assert "hausdorff" not in compare_fingerprints(ref, impl)
+
+
+class TestCompareMeanTolerance:
+    """--hausdorff-mean-tol has to reach compare, not just the generator."""
+
+    def test_mean_tolerance_is_applied(self, tmp_path):
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.compare import compare_fingerprints
+
+        ref_path = str(tmp_path / "a.step")
+        impl_path = str(tmp_path / "b.step")
+        export_step(Box(10, 20, 30), ref_path)
+        export_step(Box(10, 20, 30.4), impl_path)
+        ref = CadFingerprint.from_step(ref_path)
+        impl = CadFingerprint.from_step(impl_path)
+
+        relaxed = compare_fingerprints(ref, impl, hausdorff_mean_tol_mm=1.0,
+                                       hausdorff_samples=500)
+        strict = compare_fingerprints(ref, impl, hausdorff_mean_tol_mm=0.001,
+                                      hausdorff_samples=500)
+        assert relaxed["hausdorff"]["mean_status"] == "pass"
+        assert strict["hausdorff"]["mean_status"] != "pass"
+        assert strict["hausdorff"]["status"] != "pass"
+        # ... but never tighter than the meshes can resolve
+        assert strict["hausdorff"]["mean_tolerance"] > 0.001

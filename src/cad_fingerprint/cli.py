@@ -61,8 +61,10 @@ def _add_analysis_args(parser):
     )
     parser.add_argument(
         "--mesh-deflection", type=float, default=None,
-        help="Triangulation deflection mm for the reference surface mesh "
-             "(default: bounding-box diagonal / 1000)",
+        help="Surface mesh resolution in mm — the triangulation deflection "
+             "for a STEP reference and for the part under test; for an STL "
+             "reference, whose facets cannot be re-meshed, the "
+             "vertex-clustering cell (default: bounding-box diagonal / 1000)",
     )
     parser.add_argument(
         "--no-hausdorff", action="store_true",
@@ -218,6 +220,7 @@ def _run_compare(args):
         cross_section_centroid_tol_mm=args.xs_centroid_tol,
         radial_tol_mm=args.radial_tol,
         hausdorff_tol_mm=args.hausdorff_tol,
+        hausdorff_mean_tol_mm=args.hausdorff_mean_tol,
         hausdorff_samples=args.hausdorff_samples,
     )
     print(format_comparison(result))

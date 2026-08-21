@@ -106,7 +106,8 @@ def generate_test_file(
     lines.append("")
 
     # ── imports ──────────────────────────────────────────────────────
-    has_mesh = bool(getattr(fp, "surface_mesh", None))
+    has_mesh = bool(getattr(fp, "surface_mesh", None)
+                    and fp.surface_mesh.get("triangle_count"))
 
     lines.append("import math")
     if has_mesh:
@@ -666,8 +667,15 @@ def generate_test_file(
 
     # -- Hausdorff surface deviation
     if has_mesh:
+        from .hausdorff import tolerance_floor
+
+        floor = tolerance_floor(fp.surface_mesh)
         lines.extend(_hausdorff_test_lines(
-            fixture_name, hausdorff_tol_mm, hausdorff_mean_tol_mm,
+            fixture_name,
+            max(hausdorff_tol_mm, floor),
+            max(hausdorff_mean_tol_mm, floor / 4.0),
+            fp.surface_mesh,
+            raised=floor > hausdorff_tol_mm,
         ))
 
     # -- Build quality
@@ -766,6 +774,7 @@ def _reference_mesh_lines(surface_mesh: dict, samples: int) -> list[str]:
         f'    "bbox_max": {_fmt_tuple(surface_mesh["bbox_max"], 6)},',
         f'    "index_bits": {surface_mesh["index_bits"]},',
         f'    "deflection": {surface_mesh["deflection"]},',
+        f'    "resolution": {surface_mesh.get("resolution", surface_mesh["deflection"])},',
     ]
     lines.extend(_wrapped_b64("vertices", surface_mesh["vertices"]))
     lines.extend(_wrapped_b64("triangles", surface_mesh["triangles"]))
@@ -813,29 +822,65 @@ def _hausdorff_helper_lines() -> list[str]:
     _HAUSDORFF_CACHE = {}
 
 
+    def _shape_signature(shape):
+        """Cheap key identifying a shape's geometry (not its object identity)."""
+        props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(shape.wrapped, props)
+        bb = shape.bounding_box()
+        return (
+            round(props.Mass(), 9),
+            round(bb.min.X, 9), round(bb.min.Y, 9), round(bb.min.Z, 9),
+            round(bb.max.X, 9), round(bb.max.Y, 9), round(bb.max.Z, 9),
+        )
+
+
     def _hausdorff_vs_reference(shape):
         """Two-sided surface deviation between `shape` and the reference mesh.
 
-        Cached per part object so the max/mean tests share one computation.
+        Keyed on the shape's geometry rather than on `id()`, because a
+        function-scoped pytest fixture hands each test a freshly built part —
+        the max and mean tests would otherwise pay for the whole measurement
+        twice.
         """
-        cached = _HAUSDORFF_CACHE.get(id(shape))
-        if cached is not None:
-            return cached[1]
+        key = _shape_signature(shape)
+        if key in _HAUSDORFF_CACHE:
+            return _HAUSDORFF_CACHE[key]
         reference = decode_mesh(REF_MESH)
         actual = _triangulate(shape, REF_MESH["deflection"], 0.35, True)
         result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
-        # keep a reference to `shape` so its id cannot be reused
-        _HAUSDORFF_CACHE[id(shape)] = (shape, result)
+        if len(_HAUSDORFF_CACHE) > 4:
+            _HAUSDORFF_CACHE.clear()
+        _HAUSDORFF_CACHE[key] = result
         return result
     ''').split("\n"))
     return lines
 
 
 def _hausdorff_test_lines(
-    fixture_name: str, max_tol_mm: float, mean_tol_mm: float,
+    fixture_name: str,
+    max_tol_mm: float,
+    mean_tol_mm: float,
+    surface_mesh: dict,
+    raised: bool = False,
 ) -> list[str]:
-    """Emit the Hausdorff distance test class."""
-    return textwrap.dedent(f'''\
+    """Emit the Hausdorff distance test class.
+
+    Args:
+        max_tol_mm / mean_tol_mm: tolerances, already floored to what the
+            reference mesh can actually resolve.
+        surface_mesh: the reference mesh entry, for the explanatory comment.
+        raised: whether mesh resolution forced the tolerances up.
+    """
+    note = [
+        f"# Surface-deviation tolerances were raised to match the reference",
+        f"# mesh resolution ({surface_mesh['resolution']:.4f} mm): two"
+        f" triangulations of the same",
+        f"# surface differ by about twice that, so anything tighter would"
+        f" flag meshing",
+        f"# noise as a defect. Re-run with a smaller --mesh-deflection for"
+        f" a finer check.",
+    ] if raised else []
+    body = textwrap.dedent(f'''\
 
     class TestSurfaceDeviation:
         """Hausdorff distance — worst-case point-to-surface deviation.
@@ -846,14 +891,21 @@ def _hausdorff_test_lines(
         """
 
         def test_max_deviation(self, {fixture_name}):
-            """No point on either surface is further than the tolerance away."""
+            """No sampled point on either surface is further than the tolerance.
+
+            This is a sampled estimate, not a proof: with HAUSDORFF_SAMPLES
+            points per direction against {surface_mesh['triangle_count']}
+            reference triangles, a defect confined to a few triangles can be
+            missed. Raise --hausdorff-samples to sample the surface harder.
+            """
             result = _hausdorff_vs_reference({fixture_name})
             fwd = result["forward"]["max"]
             bwd = result["backward"]["max"]
             side = "missing material" if fwd > bwd else "excess material"
             assert result["hausdorff"] < {max_tol_mm}, (
                 f"Hausdorff distance {{result['hausdorff']:.4f}}mm exceeds "
-                f"{max_tol_mm}mm (ref→part {{fwd:.4f}}, part→ref {{bwd:.4f}}, "
+                f"{max_tol_mm}mm over {{result['samples']}} samples/direction "
+                f"(ref→part {{fwd:.4f}}, part→ref {{bwd:.4f}}, "
                 f"95th pct {{result['p95']:.4f}}) — worst area looks like {{side}}"
             )
 
@@ -867,6 +919,9 @@ def _hausdorff_test_lines(
                 f"local feature"
             )
     ''').split("\n")
+    if note:
+        body[1:1] = note + [""]
+    return body
 
 
 def generate_prompt(

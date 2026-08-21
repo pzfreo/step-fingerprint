@@ -600,15 +600,21 @@ def mesh_shape(
     Args:
         shape: build123d Part (STEP) or Face (STL, already triangulated).
         deflection: linear deflection in mm; ``None`` picks one from the
-            bounding-box diagonal.
+            bounding-box diagonal. For STL it cannot re-mesh the facets, so
+            it is used as the vertex-clustering cell instead (and as the
+            deflection the part under test is meshed with).
         angular_deflection: angular deflection in radians.
-        max_triangles: budget — meshing is retried coarser until the mesh fits.
+        max_triangles: budget. STEP meshes are retried coarser until they
+            fit; STL meshes are vertex-clustered.
         remesh: run BRepMesh_IncrementalMesh (False for STL, which arrives
             already triangulated and has no analytical surface to re-mesh).
 
-    Returns a dict with the encoded mesh plus the deflection actually used.
+    Returns the encoded mesh plus:
+        ``deflection`` — what the part under test should be meshed with,
+        ``resolution`` — how far this mesh may sit from the true surface,
+        ``remeshed`` / ``cluster_cell`` — how the budget was met.
     """
-    from .hausdorff import encode_mesh
+    from .hausdorff import cluster_decimate, encode_mesh
 
     bb = shape.bounding_box()
     diag = math.sqrt(
@@ -616,40 +622,92 @@ def mesh_shape(
         + (bb.max.Y - bb.min.Y) ** 2
         + (bb.max.Z - bb.min.Z) ** 2
     )
+    requested = deflection
     if deflection is None:
         deflection = min(max(diag / 1000.0, 0.005), 0.2)
 
     vertices, triangles = _triangulate(shape, deflection, angular_deflection, remesh)
-    attempts = 0
-    while remesh and len(triangles) > max_triangles and attempts < 5:
-        deflection *= 1.7
-        attempts += 1
-        vertices, triangles = _triangulate(
-            shape, deflection, angular_deflection, remesh
-        )
+
+    cluster_cell = 0.0
+    if remesh:
+        # Analytical surfaces can simply be re-meshed coarser.
+        attempts = 0
+        while len(triangles) > max_triangles and attempts < 5:
+            deflection *= 1.7
+            attempts += 1
+            vertices, triangles = _triangulate(
+                shape, deflection, angular_deflection, remesh
+            )
+        resolution = deflection
+    else:
+        # STL facets cannot be re-meshed; cluster vertices instead, either
+        # at the cell the caller asked for or at whatever meets the budget.
+        cluster_cell = requested or 0.0
+        if not cluster_cell and len(triangles) > max_triangles:
+            # One cluster per cell, so aim the cell at the edge length a
+            # mesh of max_triangles covering this surface would have.
+            cluster_cell = math.sqrt(
+                2.0 * _mesh_area(vertices, triangles) / max_triangles
+            )
+        if cluster_cell:
+            clustered = cluster_decimate(vertices, triangles, cluster_cell)
+            attempts = 0
+            while len(clustered[1]) > max_triangles and attempts < 8:
+                cluster_cell *= 1.4
+                attempts += 1
+                clustered = cluster_decimate(vertices, triangles, cluster_cell)
+            vertices, triangles = clustered
+        # An as-supplied STL is treated as ground truth: its only error is
+        # whatever the clustering introduced.
+        resolution = cluster_cell
 
     data = encode_mesh(vertices, triangles)
     data["deflection"] = round(deflection, 6)
+    data["resolution"] = round(resolution, 6)
+    data["remeshed"] = remesh
+    data["cluster_cell"] = round(cluster_cell, 6)
     data["diagonal"] = round(diag, 4)
     return data
 
 
+def _mesh_area(vertices, triangles) -> float:
+    """Total surface area of a triangle mesh."""
+    total = 0.0
+    for i, j, k in triangles:
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        total += 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+    return total
+
+
 def _triangulate(shape, deflection, angular_deflection, remesh):
-    """Return (vertices, triangles) for a shape, meshing it first if asked."""
+    """Return (vertices, triangles) for a shape, meshing it first if asked.
+
+    Meshing writes a triangulation into the shape, so a copy is meshed and
+    the caller's shape is left exactly as it was — generated tests must not
+    mutate the fixture they are handed.
+    """
     from OCP.BRep import BRep_Tool
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.BRepTools import BRepTools
     from OCP.TopLoc import TopLoc_Location
 
+    target = shape.wrapped
     if remesh:
-        BRepTools.Clean_s(shape.wrapped)
+        target = BRepBuilderAPI_Copy(target).Shape()
+        BRepTools.Clean_s(target)
         BRepMesh_IncrementalMesh(
-            shape.wrapped, deflection, False, angular_deflection, True
+            target, deflection, False, angular_deflection, True
         )
 
     vertices: list = []
     triangles: list = []
-    explorer = TopExp_Explorer(shape.wrapped, TopAbs_FACE)
+    explorer = TopExp_Explorer(target, TopAbs_FACE)
     while explorer.More():
         face = TopoDS.Face_s(explorer.Current())
         loc = TopLoc_Location()
@@ -676,7 +734,7 @@ def decoded_mesh(surface_mesh: dict) -> tuple[list, list]:
     """Decode a fingerprint's ``surface_mesh`` entry into (vertices, triangles)."""
     from .hausdorff import decode_mesh
 
-    if not surface_mesh:
+    if not surface_mesh or not surface_mesh.get("triangle_count"):
         return [], []
     return decode_mesh(surface_mesh)
 
