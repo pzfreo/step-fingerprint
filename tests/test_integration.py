@@ -1144,3 +1144,36 @@ class TestCompareToleranceIsNotSelfReferential:
         coarse = compare_fingerprints(ref, impl, hausdorff_samples=400)
         assert coarse["hausdorff"]["tolerance"] > fine["hausdorff"]["tolerance"]
         assert coarse["hausdorff"]["resolution_limited"] is True
+
+
+class TestTruncatedMeshRefusesGeneration:
+    """A display-truncated fingerprint must fail loudly, not at test time."""
+
+    def test_generation_refuses_a_truncated_mesh(self, tmp_path):
+        """Piping the stdout dump to a file and generating from it used to
+        emit a test file that died inside zlib when run."""
+        import json
+        import pytest
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.cli import _summarised_json
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "trunc.step")
+        export_step(Sphere(radius=10), path)
+        fp = CadFingerprint.from_step(path)
+        truncated = CadFingerprint(**json.loads(_summarised_json(fp)))
+
+        with pytest.raises(ValueError, match="truncated"):
+            generate_test_file(truncated, module_name="trunc")
+
+    def test_full_fingerprint_still_generates(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "full.step")
+        export_step(Sphere(radius=10), path)
+        source = generate_test_file(CadFingerprint.from_step(path),
+                                    module_name="full")
+        assert "TestSurfaceDeviation" in source

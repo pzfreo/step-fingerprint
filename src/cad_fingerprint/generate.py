@@ -764,6 +764,14 @@ def _wrapped_b64(name: str, payload: str, width: int = 72) -> list[str]:
 
 def _reference_mesh_lines(surface_mesh: dict, samples: int) -> list[str]:
     """Emit the encoded reference surface mesh as a module-level constant."""
+    if surface_mesh.get("truncated") or not surface_mesh.get("vertices"):
+        # The summarised stdout dump carries counts but no payload. Say so
+        # here rather than emitting a test file that fails inside zlib.
+        raise ValueError(
+            "this fingerprint's surface mesh was truncated for display, so "
+            "no surface-deviation tests can be generated from it; re-run the "
+            "analysis with --json to write the full mesh"
+        )
     lines = [
         "# Reference surface mesh — the triangulated reference surface, used by",
         "# the Hausdorff distance tests. Vertices are 16-bit quantised over the",

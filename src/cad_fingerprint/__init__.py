@@ -17,6 +17,9 @@ fingerprints works with nothing but the standard library.
 
 __all__ = ["CadFingerprint", "StepFingerprint", "analyze_step", "analyze_stl"]
 
+_SUBMODULES = ("analyze", "cli", "compare", "fingerprint", "generate",
+               "hausdorff")
+
 
 def __getattr__(name):
     """Import the CAD-backed names on demand (PEP 562)."""
@@ -28,8 +31,14 @@ def __getattr__(name):
         from . import analyze
 
         return getattr(analyze, name)
+    if name in _SUBMODULES:
+        # Eager imports used to bind these as package attributes, so
+        # `cad_fingerprint.analyze` kept working without an explicit import.
+        import importlib
+
+        return importlib.import_module(f"{__name__}.{name}")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
-    return sorted(__all__)
+    return sorted(set(__all__) | set(_SUBMODULES))

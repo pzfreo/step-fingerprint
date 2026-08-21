@@ -178,12 +178,35 @@ def test_unknown_attribute_still_raises():
         cad_fingerprint.does_not_exist
 
 
-def test_dir_lists_the_public_names():
+def test_dir_lists_the_public_names_and_submodules():
     import cad_fingerprint
 
-    assert set(dir(cad_fingerprint)) == {
-        "CadFingerprint", "StepFingerprint", "analyze_step", "analyze_stl",
-    }
+    listed = set(dir(cad_fingerprint))
+    assert {"CadFingerprint", "StepFingerprint", "analyze_step",
+            "analyze_stl"} <= listed
+    assert {"analyze", "compare", "generate", "hausdorff"} <= listed
+
+
+def test_submodules_stay_reachable_as_attributes():
+    """Eager imports used to bind these; lazy loading must not drop them.
+
+    `import cad_fingerprint; cad_fingerprint.analyze.analyze_step(...)` worked
+    before, so it has to keep working.
+    """
+    import cad_fingerprint
+
+    assert cad_fingerprint.analyze.__name__ == "cad_fingerprint.analyze"
+    assert cad_fingerprint.hausdorff.__name__ == "cad_fingerprint.hausdorff"
+    assert callable(cad_fingerprint.compare.compare_fingerprints)
+    assert callable(cad_fingerprint.generate.generate_test_file)
+
+
+def test_pure_python_submodule_reachable_without_a_kernel():
+    assert "ok" in check(
+        "import cad_fingerprint;"
+        "cad_fingerprint.hausdorff.hausdorff_distance;"
+        "print('ok')"
+    )
 
 
 def test_cli_budget_default_matches_the_library():
