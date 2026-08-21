@@ -372,7 +372,9 @@ class TestCompareHausdorff:
         impl = self._fingerprint(Box(10, 20, 30), tmp_path, "d", capture_mesh=False)
         result = compare_fingerprints(ref, impl)
         assert "hausdorff" not in result
-        assert "Hausdorff" not in format_comparison(result)
+        # ...but the report must say the check did not run, rather than
+        # looking complete without it
+        assert "not measured" in format_comparison(result)
 
 
 class TestMeshResolutionLimits:
@@ -392,7 +394,7 @@ class TestMeshResolutionLimits:
         assert floor > 0.3, "1 mm facets on a 10 mm ball should exceed 0.3 mm"
 
         source = generate_test_file(fp, module_name="coarse")
-        assert "tolerances were raised" in source
+        assert "tolerances below were raised" in source
         assert f"< {floor}," in source
 
         namespace = {}
@@ -411,7 +413,7 @@ class TestMeshResolutionLimits:
         assert fp.surface_mesh["resolution"] == 0.0
 
         source = generate_test_file(fp, module_name="flat")
-        assert "tolerances were raised" not in source
+        assert "tolerances below were raised" not in source
         assert "< 0.3," in source
 
     def test_finer_deflection_tightens_the_angular_limit(self, tmp_path):
@@ -454,7 +456,7 @@ class TestMeshResolutionLimits:
         fp = CadFingerprint.from_step(path)
         source = generate_test_file(fp, module_name="fine")
 
-        assert "tolerances were raised" not in source
+        assert "tolerances below were raised" not in source
         assert "< 0.3," in source
         assert "< 0.05," in source
 
@@ -672,3 +674,127 @@ class TestCliValidation:
         for bad in ("0", "-0.1"):
             with pytest.raises(argparse.ArgumentTypeError):
                 _positive_float(bad)
+
+
+class TestStlFacetError:
+    """A coarse STL's own faceting cannot be guessed — it can be declared."""
+
+    def test_declared_error_overrides_the_estimate(self, tmp_path):
+        from build123d import Sphere, export_stl
+        from cad_fingerprint.analyze import analyze_stl
+
+        path = str(tmp_path / "ball_declared.stl")
+        export_stl(Sphere(radius=10), path)
+
+        estimated = analyze_stl(path)["surface_mesh"]
+        declared = analyze_stl(path, stl_facet_error=0.8)["surface_mesh"]
+        assert declared["resolution"] == 0.8
+        assert declared["facet_error_declared"] is True
+        assert estimated["facet_error_declared"] is False
+        assert declared["resolution"] > estimated["resolution"]
+
+    def test_declared_error_reaches_the_generated_tolerances(self, tmp_path):
+        from build123d import Sphere, export_stl
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+        from cad_fingerprint.hausdorff import tolerance_floor
+
+        path = str(tmp_path / "ball_tol.stl")
+        export_stl(Sphere(radius=10), path)
+        fp = CadFingerprint.from_stl(path, stl_facet_error=1.0)
+
+        floor = tolerance_floor(fp.surface_mesh)
+        assert floor > 2.0
+        source = generate_test_file(fp, module_name="ball")
+        assert f"< {floor}," in source
+        assert "--stl-facet-error" in source
+
+
+class TestMeasuredStepResolution:
+    """For STEP the chord error is measured against the real surface."""
+
+    def test_flat_part_measures_zero_however_coarse(self, tmp_path):
+        from build123d import Box, export_step
+        from cad_fingerprint import CadFingerprint
+
+        path = str(tmp_path / "flat_measured.step")
+        export_step(Box(10, 20, 30), path)
+        assert CadFingerprint.from_step(
+            path, mesh_deflection=5.0
+        ).surface_mesh["resolution"] == 0.0
+
+    def test_curved_part_measures_the_real_deviation(self, tmp_path):
+        """The floor has to cover the noise between two tessellations.
+
+        A coarse mesh is where a heuristic estimator collapsed to zero and
+        emitted tolerances a correct implementation could not meet.
+        """
+        from build123d import Cylinder, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.analyze import _triangulate, load_step
+        from cad_fingerprint.hausdorff import hausdorff_distance, tolerance_floor
+
+        path = str(tmp_path / "coarse_cyl.step")
+        export_step(Cylinder(radius=10, height=20), path)
+        fp = CadFingerprint.from_step(path, mesh_deflection=3.0)
+        mesh = fp.surface_mesh
+        assert mesh["resolution"] > 0.0
+
+        shape = load_step(path)
+        noise = hausdorff_distance(
+            _triangulate(shape, mesh["deflection"],
+                         mesh["angular_deflection"], True),
+            _triangulate(shape, mesh["deflection"] * 0.8,
+                         mesh["angular_deflection"] * 0.8, True),
+            samples=800,
+        )["hausdorff"]
+        assert noise < tolerance_floor(mesh), (
+            f"meshing noise {noise:.4f} exceeds the floor "
+            f"{tolerance_floor(mesh):.4f}"
+        )
+
+
+class TestCompareTessellationMatch:
+    """compare must tessellate both sides identically, or it measures noise."""
+
+    def test_angular_deflection_is_propagated(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+
+        path = str(tmp_path / "prop.step")
+        export_step(Sphere(radius=10), path)
+        ref = CadFingerprint.from_step(path, mesh_deflection=0.01,
+                                       max_mesh_triangles=800)
+        impl = CadFingerprint.from_step(
+            path,
+            mesh_deflection=ref.surface_mesh["deflection"],
+            mesh_angular_deflection=ref.surface_mesh["angular_deflection"],
+            max_mesh_triangles=10 ** 9,
+        )
+        assert (impl.surface_mesh["angular_deflection"]
+                == ref.surface_mesh["angular_deflection"])
+        assert (impl.surface_mesh["triangle_count"]
+                == ref.surface_mesh["triangle_count"])
+
+
+class TestCandidateMeshBudget:
+    """The part under test gets the same triangle ceiling as the reference."""
+
+    def test_budget_is_embedded_and_applied(self, tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.generate import generate_test_file
+
+        path = str(tmp_path / "budget_gen.step")
+        export_step(Sphere(radius=10), path)
+        fp = CadFingerprint.from_step(path, max_mesh_triangles=600)
+        source = generate_test_file(fp, module_name="budget")
+
+        namespace = {}
+        exec(compile(source, "budget_test.py", "exec"), namespace)
+        budget = namespace["REF_MESH"]["max_triangles"]
+        assert budget >= fp.surface_mesh["triangle_count"]
+
+        # A far more detailed part must not blow past the ceiling
+        result = namespace["_hausdorff_vs_reference"](Sphere(radius=10))
+        assert result["hausdorff"] < 1.0

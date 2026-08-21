@@ -773,6 +773,7 @@ def _reference_mesh_lines(surface_mesh: dict, samples: int) -> list[str]:
         f'    "bbox_min": {_fmt_tuple(surface_mesh["bbox_min"], 6)},',
         f'    "bbox_max": {_fmt_tuple(surface_mesh["bbox_max"], 6)},',
         f'    "index_bits": {surface_mesh["index_bits"]},',
+        f'    "max_triangles": {max(surface_mesh["triangle_count"] * 4, 20000)},',
         f'    "deflection": {surface_mesh["deflection"]},',
         f'    "angular_deflection":'
         f' {surface_mesh.get("angular_deflection", 0.35)},',
@@ -861,9 +862,17 @@ def _hausdorff_helper_lines() -> list[str]:
         if key in _HAUSDORFF_CACHE:
             return _HAUSDORFF_CACHE[key]
         reference = decode_mesh(REF_MESH)
-        actual = _triangulate(
-            shape, REF_MESH["deflection"], REF_MESH["angular_deflection"], True
-        )
+        deflection = REF_MESH["deflection"]
+        angular = REF_MESH["angular_deflection"]
+        actual = _triangulate(shape, deflection, angular, True)
+        # The reference mesh was capped; cap this one too, or a part with far
+        # more detail makes these pure-Python distance queries crawl.
+        attempts = 0
+        while len(actual[1]) > REF_MESH["max_triangles"] and attempts < 6:
+            deflection *= 1.7
+            angular = min(angular * 1.3, 1.0)
+            attempts += 1
+            actual = _triangulate(shape, deflection, angular, True)
         result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
         if len(_HAUSDORFF_CACHE) > 4:
             _HAUSDORFF_CACHE.clear()
@@ -891,22 +900,33 @@ def _hausdorff_test_lines(
     from .hausdorff import mesh_resolution
 
     if raised:
-        advice = (
-            "# Export the STL more finely for a tighter check."
-            if not surface_mesh.get("remeshed", True)
-            else "# Re-run with a smaller --mesh-deflection and a larger"
-                 " --max-mesh-triangles\n# for a finer reference mesh and"
-                 " tighter tolerances."
+        clustered = (
+            not surface_mesh.get("remeshed", True)
+            and surface_mesh.get("cluster_cell", 0.0)
+            >= surface_mesh.get("resolution", 0.0)
         )
+        if clustered:
+            # The reference STL was thinned to fit the triangle budget, so a
+            # finer export would be thinned right back down to the same mesh.
+            advice = ("# Raise --max-mesh-triangles to keep more of the"
+                      " reference mesh.")
+        elif not surface_mesh.get("remeshed", True):
+            advice = ("# Export the STL more finely, or state its tolerance"
+                      " with --stl-facet-error,\n# for a tighter check.")
+        else:
+            advice = ("# Re-run with a smaller --mesh-deflection and a larger"
+                      " --max-mesh-triangles\n# for a finer reference mesh"
+                      " and tighter tolerances.")
         note = [
-            f"# Surface-deviation tolerances were raised to match the meshing"
-            f" error",
-            f"# ({mesh_resolution(surface_mesh):.4f} mm — this reference mesh"
-            f" plus the mesh the part",
-            f"# under test is measured against). Two triangulations of one"
-            f" surface differ by",
-            f"# about that much, so anything tighter would flag meshing noise"
-            f" as a defect.",
+            f"# Surface-deviation tolerances below were raised to"
+            f" {max_tol_mm} mm max /",
+            f"# {mean_tol_mm} mm mean, to match the meshing error"
+            f" ({mesh_resolution(surface_mesh):.4f} mm — this",
+            f"# reference mesh plus the mesh the part under test is measured"
+            f" against).",
+            f"# Two triangulations of one surface differ by about that much,"
+            f" so anything",
+            f"# tighter would flag meshing noise as a defect.",
         ] + advice.split("\n")
     else:
         note = []

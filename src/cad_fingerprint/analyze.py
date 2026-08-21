@@ -591,6 +591,7 @@ def mesh_shape(
     angular_deflection: float | None = None,
     max_triangles: int = DEFAULT_MAX_TRIANGLES,
     remesh: bool = True,
+    facet_error: float | None = None,
 ) -> dict:
     """Triangulate a shape and return its mesh as an encoded fingerprint entry.
 
@@ -615,6 +616,9 @@ def mesh_shape(
             generated test file.
         remesh: run BRepMesh_IncrementalMesh (False for STL, which arrives
             already triangulated and has no analytical surface to re-mesh).
+        facet_error: for STL, the export tolerance the facets were written
+            at. ``None`` estimates it from the facets, which cannot be done
+            for a mesh coarse enough to be a faceted part in its own right.
 
     Returns the encoded mesh plus:
         ``deflection`` / ``angular_deflection`` — what the part under test
@@ -658,9 +662,13 @@ def mesh_shape(
             vertices, triangles = _triangulate(
                 shape, deflection, angular_deflection, remesh
             )
-        # What the facets actually deviate by, which for a flat-faced part
-        # is nothing at all, however coarse the deflection was.
-        resolution = estimate_facet_resolution(vertices, triangles)
+        # With the real surface in hand there is nothing to estimate: mesh
+        # it far more finely and measure how far the stored mesh sits from
+        # that. Exact for flat faces (zero), for chamfers, and for meshes so
+        # coarse that facet angles stop looking like a smooth surface.
+        resolution = _measured_resolution(
+            shape, vertices, triangles, deflection, angular_deflection
+        )
         candidate_resolution = resolution  # meshed the same way, same error
     else:
         # STL facets cannot be re-meshed; cluster vertices instead, either
@@ -694,9 +702,11 @@ def mesh_shape(
         # STL facets are themselves an approximation of whatever surface was
         # exported, so read that chord error off the mesh — a coarsely
         # exported reference cannot hold the part under test to 0.05 mm.
-        resolution = max(
-            cluster_cell, estimate_facet_resolution(vertices, triangles)
+        facets = (
+            facet_error if facet_error is not None
+            else estimate_facet_resolution(vertices, triangles)
         )
+        resolution = max(cluster_cell, facets)
         # The part under test is meshed by OCCT at `deflection`, which bounds
         # its own chord error.
         candidate_resolution = deflection
@@ -708,8 +718,35 @@ def mesh_shape(
     data["candidate_resolution"] = round(candidate_resolution, 6)
     data["remeshed"] = remesh
     data["cluster_cell"] = round(cluster_cell, 6)
+    data["facet_error_declared"] = facet_error is not None
     data["diagonal"] = round(diag, 4)
     return data
+
+
+def _measured_resolution(
+    shape, vertices, triangles, deflection, angular_deflection,
+    samples: int = 600,
+) -> float:
+    """How far a triangulation sits from the surface it approximates, in mm.
+
+    Measured, not estimated: the shape is re-meshed several times finer and
+    the stored mesh's sample points are measured against it.
+    """
+    from .hausdorff import TriangleGrid, sample_mesh_points
+
+    if not triangles:
+        return 0.0
+    fine = _triangulate(
+        shape,
+        max(deflection / 5.0, 1e-4),
+        max(angular_deflection / 3.0, 0.02),
+        True,
+    )
+    if not fine[1]:
+        return 0.0
+    grid = TriangleGrid(*fine)
+    points = sample_mesh_points(vertices, triangles, samples)
+    return max((grid.nearest_distance(p) for p in points), default=0.0)
 
 
 def _mesh_area(vertices, triangles) -> float:
@@ -1233,6 +1270,7 @@ def analyze_stl(
     capture_mesh: bool = True,
     mesh_deflection: float | None = None,
     max_mesh_triangles: int = DEFAULT_MAX_TRIANGLES,
+    stl_facet_error: float | None = None,
 ) -> dict:
     """Run full geometric analysis on an STL file.
 
@@ -1261,7 +1299,8 @@ def analyze_stl(
 
     mesh = (
         mesh_shape(stl_face, deflection=mesh_deflection, remesh=False,
-                   max_triangles=max_mesh_triangles)
+                   max_triangles=max_mesh_triangles,
+                   facet_error=stl_facet_error)
         if capture_mesh else {}
     )
     xs = cross_section_areas_mesh(stl_face, axis=axis, num_slices=num_cross_sections)
@@ -1296,6 +1335,7 @@ def analyze_step(
     num_angles: int = 12,
     capture_mesh: bool = True,
     mesh_deflection: float | None = None,
+    mesh_angular_deflection: float | None = None,
     max_mesh_triangles: int = DEFAULT_MAX_TRIANGLES,
 ) -> dict:
     """Run full geometric analysis on a STEP file.
@@ -1313,6 +1353,7 @@ def analyze_step(
     xs = cross_section_areas(shape, axis=axis, num_slices=num_cross_sections)
     mesh = (
         mesh_shape(shape, deflection=mesh_deflection,
+                   angular_deflection=mesh_angular_deflection,
                    max_triangles=max_mesh_triangles)
         if capture_mesh else {}
     )

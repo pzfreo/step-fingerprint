@@ -64,23 +64,28 @@ Both are sampled estimates — 2000 points per direction by default, so a defect
 confined to a few triangles can slip through; raise `--hausdorff-samples` to
 sample harder.
 
-Tolerances are also floored at what the mesh can actually resolve. The chord
-error of the reference mesh is measured from the facets themselves (a
-flat-faced part comes out exact however coarsely it was meshed; a curved one
-does not), added to the error of the mesh the part under test will be built
-at, and tripled — calibrated against spheres, cylinders, cones and tori, where
-two triangulations of one surface deviated by up to 1.15× the combined
-estimate. A part whose mesh has to be coarsened to fit the triangle budget
-therefore gets looser assertions and a comment in the generated file explaining
-why, rather than assertions it cannot meet. To tighten them, lower
+Tolerances are also floored at what the mesh can actually resolve, so a
+reference that had to be coarsened never asserts a tolerance a correct
+implementation cannot meet. For a STEP reference the chord error is *measured*:
+the shape is re-meshed five times finer and the stored mesh is measured against
+that. A flat-faced part comes out exact however coarsely it was meshed; a
+curved one does not. That figure plus the error of the mesh the part under test
+will be built at, doubled, is the floor. When it binds, the generated file
+carries a comment saying so and what to change. To tighten it, lower
 `--mesh-deflection` (which tightens the angular limit with it) and raise
 `--max-mesh-triangles`, at the cost of a bigger test file.
 
 For an STL reference the facets are used as supplied — there is no analytical
 surface to re-mesh — so `--mesh-deflection` becomes the vertex-clustering cell
-used to shrink an over-large mesh, and the triangle budget is met by clustering
-rather than by re-meshing. A coarsely exported STL is itself an approximation,
-which is exactly what the measured facet error accounts for.
+used to shrink an over-large mesh (capped so a thin wall cannot collapse), and
+the triangle budget is met by clustering rather than by re-meshing. A coarsely
+exported STL is itself an approximation of whatever it was exported from, and
+that error is estimated from the facets: each interior edge's turn angle over
+the span perpendicular to it gives the arc those facets approximate. Beyond a
+point the estimate cannot be made at all — a hexagonal prism and a six-facet
+cylinder are the same mesh, and nothing in the file says which was meant — so
+the estimate is printed when you run the tool, and `--stl-facet-error` lets you
+state the export tolerance outright.
 
 For STL files, face type classification is unavailable (no analytical surface
 information exists in the mesh); all other measurements work normally. The
@@ -130,6 +135,7 @@ Options:
 | `--hausdorff-samples` | 2000 | Surface sample points per direction |
 | `--mesh-deflection` | diagonal/1000 | Reference mesh resolution — deflection (STEP) or clustering cell (STL) |
 | `--max-mesh-triangles` | 12000 | Triangle budget for the reference mesh |
+| `--stl-facet-error` | estimated | Export tolerance an STL reference's facets were written at |
 | `--no-hausdorff` | — | Skip the surface mesh and Hausdorff tests |
 
 Tolerance flags (all have sensible defaults):
@@ -215,11 +221,10 @@ OCP bindings) directly:
   `BRepMesh_IncrementalMesh` (STL meshes are used as supplied, vertex-clustered
   if over budget), samples points over the surface area-weighted with a
   deterministic low-discrepancy sequence, and measures point-to-triangle
-  distances through a uniform spatial grid. Mesh chord error is read back off
-  the facets — each interior edge's turn angle over the span perpendicular to
-  it gives the local arc it approximates — and bounds the tolerances. No RNG is
-  involved and the input shape is never mutated, so the same input always
-  yields the same numbers.
+  distances through a uniform spatial grid. Mesh chord error — measured against
+  a far finer re-mesh for STEP, estimated from facet fold angles for STL —
+  bounds the tolerances. No RNG is involved and the input shape is never
+  mutated, so the same input always yields the same numbers.
 - **Build quality** — `ShapeAnalysis_FreeBounds` for free/non-manifold edges;
   `BRepCheck_Analyzer` for invalid geometry; minimum wall thickness via
   ray-sampling.

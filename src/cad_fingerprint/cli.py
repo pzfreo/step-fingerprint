@@ -99,6 +99,13 @@ def _add_analysis_args(parser):
              "test file (default: 12000)",
     )
     parser.add_argument(
+        "--stl-facet-error", type=_positive_float, default=None,
+        help="For an STL reference, the export tolerance its facets were "
+             "written at, in mm. Estimated from the facets when omitted — "
+             "which is impossible for a mesh coarse enough to be a faceted "
+             "part in its own right",
+    )
+    parser.add_argument(
         "--no-hausdorff", action="store_true",
         help="Skip the surface mesh and Hausdorff distance measurements",
     )
@@ -133,6 +140,7 @@ def _run_analyze(args):
             capture_mesh=not args.no_hausdorff,
             mesh_deflection=args.mesh_deflection,
             max_mesh_triangles=args.max_mesh_triangles,
+            stl_facet_error=args.stl_facet_error,
         )
         print("  (STL mode: face inventory shows mesh stats only, no surface type classification)")
     else:
@@ -158,12 +166,14 @@ def _run_analyze(args):
                    + len(fp.surface_mesh["triangles"])) // 1024
         print(f"  Surface mesh: {fp.surface_mesh['triangle_count']} triangles "
               f"at {fp.surface_mesh['deflection']:.4f} mm deflection ({mesh_kb} KB embedded)")
+        if is_stl and not fp.surface_mesh.get("facet_error_declared"):
+            print(f"  STL facet error: {fp.surface_mesh['resolution']:.4f} mm "
+                  f"estimated from the facets — pass --stl-facet-error to "
+                  f"state your export tolerance instead")
         if mesh_kb > 250:
-            hint = ("re-export the STL more coarsely" if is_stl
-                    else "raise --mesh-deflection or lower "
-                         "--max-mesh-triangles")
             print(f"  Note: that mesh is large for an embedded test file — "
-                  f"{hint}, or pass --no-hausdorff to skip it.")
+                  f"lower --max-mesh-triangles or raise --mesh-deflection, "
+                  f"or pass --no-hausdorff to skip it.")
 
     if args.json:
         fp.to_json(args.json)
@@ -238,12 +248,17 @@ def _run_compare(args):
         num_radial_slices=args.radial_slices,
         num_angles=args.angles,
         capture_mesh=not args.no_hausdorff,
+        # Match the reference's tessellation exactly — different meshing
+        # settings on the two sides would show up as surface deviation.
         mesh_deflection=(
             args.mesh_deflection
             if args.mesh_deflection is not None
             else ref_fp.surface_mesh.get("deflection")
         ),
-        max_mesh_triangles=args.max_mesh_triangles,
+        mesh_angular_deflection=ref_fp.surface_mesh.get("angular_deflection"),
+        max_mesh_triangles=(
+            10 ** 9 if ref_fp.surface_mesh else args.max_mesh_triangles
+        ),
     )
 
     print()

@@ -410,3 +410,82 @@ class TestSampleCountValidation:
 
         with pytest.raises(ValueError):
             hausdorff_distance(cube_mesh(), cube_mesh(), samples=-5)
+
+
+class TestCoarseFoldFraction:
+    """Signals when facet folds are too sharp to read as chord error."""
+
+    def test_flat_mesh_has_no_sharp_interior_folds(self):
+        from cad_fingerprint.hausdorff import coarse_fold_fraction
+
+        assert coarse_fold_fraction(*_planar_mesh(steps=8)) == 0.0
+
+    def test_cube_is_all_sharp_folds(self):
+        from cad_fingerprint.hausdorff import coarse_fold_fraction
+
+        # Every non-diagonal edge of a cube turns by 90°
+        assert coarse_fold_fraction(*cube_mesh()) > 0.5
+
+    def test_empty_mesh(self):
+        from cad_fingerprint.hausdorff import coarse_fold_fraction
+
+        assert coarse_fold_fraction([], []) == 0.0
+
+
+class TestFacetResolutionAccuracy:
+    """The estimate is checked against chord error that is known exactly."""
+
+    @staticmethod
+    def _prism(sides, radius=10.0, height=20.0):
+        """n-gon prism: chord error against the cylinder is r(1 - cos(pi/n))."""
+        vertices, triangles = [], []
+        for i in range(sides):
+            angle = 2 * math.pi * i / sides
+            x, y = radius * math.cos(angle), radius * math.sin(angle)
+            vertices += [(x, y, 0.0), (x, y, height)]
+        for i in range(sides):
+            a, b = 2 * i, 2 * i + 1
+            c = (2 * (i + 1)) % (2 * sides)
+            d = (2 * (i + 1) + 1) % (2 * sides)
+            triangles += [(a, c, b), (b, c, d)]
+        bottom, top = len(vertices), len(vertices) + 1
+        vertices += [(0.0, 0.0, 0.0), (0.0, 0.0, height)]
+        for i in range(sides):
+            triangles.append((bottom, 2 * ((i + 1) % sides), 2 * i))
+            triangles.append((top, 2 * i + 1, 2 * ((i + 1) % sides) + 1))
+        return vertices, triangles
+
+    def test_matches_analytic_chord_error(self):
+        from cad_fingerprint.hausdorff import estimate_facet_resolution
+
+        for sides in (8, 12, 24, 48, 96):
+            estimate = estimate_facet_resolution(*self._prism(sides))
+            exact = 10.0 * (1 - math.cos(math.pi / sides))
+            assert abs(estimate - exact) / exact < 0.1, (
+                f"{sides} sides: estimate {estimate:.5f} vs exact {exact:.5f}"
+            )
+
+    def test_chamfer_band_contributes_only_its_own_width(self):
+        """A narrow chamfer between broad faces is a feature, not chord error.
+
+        Measuring the span across the *broad* face would report a chord
+        error the size of the whole part.
+        """
+        from cad_fingerprint.hausdorff import estimate_facet_resolution
+
+        # Two 50 mm faces meeting through a 0.5 mm chamfer band at 30°
+        vertices = [
+            (0.0, 0.0, 0.0), (0.0, 50.0, 0.0),
+            (50.0, 0.0, 0.0), (50.0, 50.0, 0.0),
+            (50.433, 0.0, 0.25), (50.433, 50.0, 0.25),
+            (100.0, 0.0, 0.25), (100.0, 50.0, 0.25),
+        ]
+        triangles = [
+            (0, 2, 1), (1, 2, 3),        # broad face
+            (2, 4, 3), (3, 4, 5),        # chamfer band
+            (4, 6, 5), (5, 6, 7),        # broad face
+        ]
+        estimate = estimate_facet_resolution(vertices, triangles)
+        assert estimate < 0.1, (
+            f"chamfer read as {estimate:.4f} mm of chord error"
+        )

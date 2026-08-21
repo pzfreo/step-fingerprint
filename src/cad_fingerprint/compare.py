@@ -305,6 +305,10 @@ def format_comparison(result: dict) -> str:
         if h["resolution_limited"]:
             lines.append("    (tolerances raised to the mesh resolution — "
                          "lower --mesh-deflection for a finer check)")
+    else:
+        lines.append(f"{_BOLD}Surface Deviation (Hausdorff){_RESET}")
+        lines.append("  - not measured: one or both fingerprints have no "
+                     "surface mesh")
 
     # Summary
     lines.append("")

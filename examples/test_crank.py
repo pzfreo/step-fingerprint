@@ -127,9 +127,10 @@ REF_MESH = {
     "bbox_min": (-7.997518, 38.000000, 55.050007),
     "bbox_max": (47.997517, 53.000000, 71.049995),
     "index_bits": 16,
+    "max_triangles": 20000,
     "deflection": 0.060137,
     "angular_deflection": 0.35,
-    "resolution": 0.284136,
+    "resolution": 0.065915,
     "candidate_resolution": 0.060137,
     "vertices": (
         "eNolmHlcTfkbx0/IvswwVPd27q1bd7/dixHGNIxhMIMZqRTJlHYphaKkkKQs5bbetmOJEhpj"
@@ -1086,9 +1087,17 @@ def _hausdorff_vs_reference(shape):
     if key in _HAUSDORFF_CACHE:
         return _HAUSDORFF_CACHE[key]
     reference = decode_mesh(REF_MESH)
-    actual = _triangulate(
-        shape, REF_MESH["deflection"], REF_MESH["angular_deflection"], True
-    )
+    deflection = REF_MESH["deflection"]
+    angular = REF_MESH["angular_deflection"]
+    actual = _triangulate(shape, deflection, angular, True)
+    # The reference mesh was capped; cap this one too, or a part with far
+    # more detail makes these pure-Python distance queries crawl.
+    attempts = 0
+    while len(actual[1]) > REF_MESH["max_triangles"] and attempts < 6:
+        deflection *= 1.7
+        angular = min(angular * 1.3, 1.0)
+        attempts += 1
+        actual = _triangulate(shape, deflection, angular, True)
     result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
     if len(_HAUSDORFF_CACHE) > 4:
         _HAUSDORFF_CACHE.clear()
@@ -1254,11 +1263,13 @@ class TestRadialProfile:
             )
 
 
-# Surface-deviation tolerances were raised to match the meshing error
-# (0.3443 mm — this reference mesh plus the mesh the part
-# under test is measured against). Two triangulations of one surface differ by
-# about that much, so anything tighter would flag meshing noise as a defect.
-# Export the STL more finely for a tighter check.
+# Surface-deviation tolerances below were raised to 0.3 mm max /
+# 0.063026 mm mean, to match the meshing error (0.1261 mm — this
+# reference mesh plus the mesh the part under test is measured against).
+# Two triangulations of one surface differ by about that much, so anything
+# tighter would flag meshing noise as a defect.
+# Export the STL more finely, or state its tolerance with --stl-facet-error,
+# for a tighter check.
 
 class TestSurfaceDeviation:
     """Hausdorff distance — worst-case point-to-surface deviation.
@@ -1280,9 +1291,9 @@ class TestSurfaceDeviation:
         fwd = result["forward"]["max"]
         bwd = result["backward"]["max"]
         side = "missing material" if fwd > bwd else "excess material"
-        assert result["hausdorff"] < 1.032819, (
+        assert result["hausdorff"] < 0.3, (
             f"Hausdorff distance {result['hausdorff']:.4f}mm exceeds "
-            f"1.032819mm over {result['samples']} samples/direction "
+            f"0.3mm over {result['samples']} samples/direction "
             f"(ref→part {fwd:.4f}, part→ref {bwd:.4f}, "
             f"95th pct {result['p95']:.4f}) — worst area looks like {side}"
         )
@@ -1290,9 +1301,9 @@ class TestSurfaceDeviation:
     def test_mean_deviation(self, part_under_test):
         """The surfaces agree closely on average, not just at worst case."""
         result = _hausdorff_vs_reference(part_under_test)
-        assert result["mean"] < 0.25820475, (
+        assert result["mean"] < 0.063026, (
             f"Mean surface deviation {result['mean']:.4f}mm exceeds "
-            f"0.25820475mm (RMS {result['rms']:.4f}, 95th pct "
+            f"0.063026mm (RMS {result['rms']:.4f}, 95th pct "
             f"{result['p95']:.4f}) — the whole surface is off, not just a "
             f"local feature"
         )

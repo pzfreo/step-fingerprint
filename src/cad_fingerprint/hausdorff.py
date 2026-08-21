@@ -155,26 +155,56 @@ def cluster_decimate(vertices, triangles, cell: float) -> tuple[list, list]:
 
 
 def estimate_facet_resolution(
-    vertices, triangles, smooth_angle_limit: float = 0.7854,
+    vertices, triangles, feature_angle_limit: float = 0.7854,
 ) -> float:
     """Estimate how far a triangulation sits from the smooth surface behind it.
 
-    An STL arrives with no analytical surface, so its chord error has to be
-    read off the facets themselves. Across a smooth interior edge the two
-    facets turn by an angle ``theta`` over a span ``h``, approximating an arc
-    of radius ``h / theta`` whose chord sits ``h * theta / 8`` inside it.
+    Used for STL, where there is no analytical surface to measure against —
+    the chord error has to be read off the facets themselves. Across a smooth
+    interior edge the two facets turn by an angle ``theta`` over a span ``h``,
+    approximating an arc of radius ``h / theta`` whose chord sits
+    ``h * theta / 8`` inside it. ``h`` is the *smaller* of the two facets'
+    extents perpendicular to the shared edge, so a narrow chamfer band
+    between two broad faces contributes only its own width.
 
-    ``h`` is measured perpendicular to the shared edge — the direction the
-    surface actually curves in — so a mesh of long thin facets (a cylinder
-    wall, a swept rib) is not mistaken for a coarse one.
+    Folds sharper than ``feature_angle_limit`` are read as real features, not
+    as chord error, and ignored. That is a genuine limit rather than a
+    conservative choice: a hexagonal prism and a six-facet cylinder are the
+    same mesh, and nothing in the file says which was meant. A mesh coarse
+    enough for that ambiguity to matter is reported by
+    :func:`coarse_fold_fraction`, and the caller can state the export
+    tolerance outright instead of estimating it.
 
-    Edges that turn by more than ``smooth_angle_limit`` are treated as real
-    feature edges — a cube's corners are exact, not an approximation — and
-    ignored. The worst remaining edge is returned, which is the right pairing
-    for a worst-case Hausdorff tolerance.
+    Returns the worst qualifying edge, which is the right pairing for a
+    worst-case Hausdorff tolerance.
     """
-    if not triangles:
+    worst = 0.0
+    for span, theta in _interior_folds(vertices, triangles):
+        if theta <= feature_angle_limit:
+            worst = max(worst, span * theta / 8.0)
+    return worst
+
+
+def coarse_fold_fraction(
+    vertices, triangles, feature_angle_limit: float = 0.7854,
+) -> float:
+    """Fraction of interior edges folding too sharply to read as chord error.
+
+    High on a coarsely faceted mesh — and on a genuinely faceted part, which
+    is the ambiguity — so it is a reason to ask the user for the export
+    tolerance, not a measurement in itself.
+    """
+    folds = list(_interior_folds(vertices, triangles))
+    if not folds:
         return 0.0
+    sharp = sum(1 for _, theta in folds if theta > feature_angle_limit)
+    return sharp / len(folds)
+
+
+def _interior_folds(vertices, triangles):
+    """Yield (span, turn angle) for every manifold interior edge."""
+    if not triangles:
+        return
 
     normals = []
     for i, j, k in triangles:
@@ -201,7 +231,6 @@ def estimate_facet_resolution(
             edge = (ka, kb) if ka <= kb else (kb, ka)
             edges.setdefault(edge, []).append((t, key(opposite)))
 
-    worst = 0.0
     for (ka, kb), facets in edges.items():
         if len(facets) != 2:
             continue  # boundary, or non-manifold — no dihedral to read
@@ -210,12 +239,10 @@ def estimate_facet_resolution(
         if n1 is None or n2 is None:
             continue
         dot = min(max(n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2], -1.0), 1.0)
-        theta = math.acos(dot)
-        if theta > smooth_angle_limit:
-            continue  # a genuine sharp edge, not chord error
-        span = (_distance_to_line(p1, ka, kb) + _distance_to_line(p2, ka, kb)) / 2
-        worst = max(worst, span * theta / 8.0)
-    return worst
+        span = min(
+            _distance_to_line(p1, ka, kb), _distance_to_line(p2, ka, kb)
+        )
+        yield span, math.acos(dot)
 
 
 def _distance_to_line(point, a, b) -> float:
@@ -251,13 +278,14 @@ def mesh_resolution(surface_mesh: dict) -> float:
 def tolerance_floor(surface_mesh: dict) -> float:
     """Smallest deviation a mesh of this resolution can meaningfully resolve.
 
-    Three times the combined meshing error. Measured across spheres,
-    cylinders, cones and tori at deflections from 0.02 mm to 1.5 mm, the
-    deviation between two triangulations of one surface reached 1.15x the
-    combined estimate — a facet's centre bulges further from the true
-    surface than its edges do — so the multiplier carries that plus margin.
+    Twice the combined meshing error. For a STEP reference that error is
+    measured rather than estimated, and across spheres, cylinders, cones and
+    tori at deflections from 0.02 mm to 5 mm the deviation between two
+    triangulations of one surface stayed at ~0.35x the combined figure; the
+    margin covers the STL path, where the error can only be estimated from
+    the facets and can run about 1.4x under the truth.
     """
-    return 3.0 * mesh_resolution(surface_mesh)
+    return 2.0 * mesh_resolution(surface_mesh)
 
 
 # ── point ↔ triangle distance ────────────────────────────────────────
