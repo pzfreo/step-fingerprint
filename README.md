@@ -204,6 +204,26 @@ h = hausdorff_distance(decoded_mesh(fp.surface_mesh),
 print(f"{h['hausdorff']:.4f} mm worst case, {h['mean']:.4f} mm mean")
 ```
 
+### Comparing without a CAD kernel
+
+Reading STEP or STL needs build123d and OCC, but a saved JSON fingerprint
+carries its own surface mesh and the distance code is pure Python. So the
+names that need a CAD kernel are imported on first use, and comparing two
+saved fingerprints — Hausdorff distance included — runs anywhere Python does:
+
+```python
+# no build123d installed
+from cad_fingerprint import CadFingerprint
+from cad_fingerprint.compare import compare_fingerprints, format_comparison
+
+ref = CadFingerprint.from_json("reference.json")
+impl = CadFingerprint.from_json("implementation.json")
+print(format_comparison(compare_fingerprints(ref, impl)))
+```
+
+`from_step` / `from_stl` still raise `ModuleNotFoundError` without build123d —
+they have a CAD file to read.
+
 ## Approach
 
 The analyser uses [OpenCASCADE](https://www.opencascade.com/) (via build123d's

@@ -1,4 +1,9 @@
-"""CadFingerprint — captures and stores a complete geometric fingerprint."""
+"""CadFingerprint — captures and stores a complete geometric fingerprint.
+
+``analyze`` is imported inside the classmethods that read a CAD file, so
+loading a saved fingerprint from JSON — and comparing it against another —
+needs no CAD kernel.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +11,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-
-from . import analyze
 
 
 @dataclass
@@ -42,7 +45,7 @@ class CadFingerprint:
         num_angles: int = 12,
         capture_mesh: bool = True,
         mesh_deflection: Optional[float] = None,
-        max_mesh_triangles: int = analyze.DEFAULT_MAX_TRIANGLES,
+        max_mesh_triangles: Optional[int] = None,
         stl_facet_error: Optional[float] = None,
     ) -> "CadFingerprint":
         """Analyze an STL file and return its fingerprint.
@@ -51,6 +54,10 @@ class CadFingerprint:
         classification — detect_primitives is not yet in a released build123d).
         Cross-sections and radial profile are fully functional.
         """
+        from . import analyze
+
+        if max_mesh_triangles is None:
+            max_mesh_triangles = analyze.DEFAULT_MAX_TRIANGLES
         data = analyze.analyze_stl(
             str(path),
             axis=axis,
@@ -75,9 +82,13 @@ class CadFingerprint:
         capture_mesh: bool = True,
         mesh_deflection: Optional[float] = None,
         mesh_angular_deflection: Optional[float] = None,
-        max_mesh_triangles: int = analyze.DEFAULT_MAX_TRIANGLES,
+        max_mesh_triangles: Optional[int] = None,
     ) -> "CadFingerprint":
         """Analyze a STEP file and return its fingerprint."""
+        from . import analyze
+
+        if max_mesh_triangles is None:
+            max_mesh_triangles = analyze.DEFAULT_MAX_TRIANGLES
         data = analyze.analyze_step(
             str(path),
             axis=axis,

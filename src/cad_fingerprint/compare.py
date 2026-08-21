@@ -1,7 +1,8 @@
-"""Compare two STEP files by diffing their geometric fingerprints.
+"""Compare two fingerprints by diffing their geometric measurements.
 
 Produces a structured comparison with pass/close/fail status for each
-metric, and a color-coded terminal summary.
+metric, and a color-coded terminal summary. Works on fingerprints loaded
+from JSON, which needs no CAD kernel.
 """
 
 from __future__ import annotations
@@ -158,12 +159,14 @@ def compare_fingerprints(
     if ref.surface_mesh.get("triangle_count") and actual.surface_mesh.get(
         "triangle_count"
     ):
-        from .analyze import decoded_mesh
-        from .hausdorff import hausdorff_distance, tolerance_floor
+        # decode_mesh rather than analyze.decoded_mesh: this path stays
+        # free of build123d, so two saved fingerprints can be compared
+        # without a CAD kernel installed.
+        from .hausdorff import decode_mesh, hausdorff_distance, tolerance_floor
 
         h = hausdorff_distance(
-            decoded_mesh(ref.surface_mesh),
-            decoded_mesh(actual.surface_mesh),
+            decode_mesh(ref.surface_mesh),
+            decode_mesh(actual.surface_mesh),
             samples=hausdorff_samples,
         )
         # Never grade below what the meshes can resolve — but derive that
