@@ -21,12 +21,20 @@ functional.
 """
 
 import math
+import base64
+import bisect
+import struct
+import zlib
 
 import pytest
 
 from build123d import Part
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
+from OCP.BRep import BRep_Tool
+from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.BRepTools import BRepTools
+from OCP.TopLoc import TopLoc_Location
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
 from OCP.BRepGProp import BRepGProp
 from OCP.GCPnts import GCPnts_AbscissaPoint
@@ -38,7 +46,7 @@ from OCP.GeomAbs import (
 from OCP.GProp import GProp_GProps
 from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector
 from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_VERTEX
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopTools import TopTools_HSequenceOfShape
 from OCP.TopoDS import TopoDS
@@ -108,6 +116,417 @@ REF_RADIAL_PROFILE = [
     {"position": 69.7700, "radii": {0.0: 24.3361, 30.0: None, 60.0: None, 90.0: None, 120.0: None, 150.0: None, 180.0: 24.3361, 210.0: None, 240.0: None, 270.0: None, 300.0: None, 330.0: None}},
     {"position": 70.8900, "radii": {0.0: 21.5918, 30.0: None, 60.0: None, 90.0: None, 120.0: None, 150.0: None, 180.0: None, 210.0: None, 240.0: None, 270.0: None, 300.0: None, 330.0: None}},
 ]
+
+# Reference surface mesh — the triangulated reference surface, used by
+# the Hausdorff distance tests. Vertices are 16-bit quantised over the
+# bounding box (sub-micron), zlib-compressed and base64-encoded.
+REF_MESH = {
+    "encoding": "q16",
+    "vertex_count": 1697,
+    "triangle_count": 3402,
+    "bbox_min": (-7.997518, 38.000000, 55.050007),
+    "bbox_max": (47.997517, 53.000000, 71.049995),
+    "index_bits": 16,
+    "max_triangles": 20000,
+    "deflection": 0.060137,
+    "angular_deflection": 0.35,
+    "resolution": 0.065915,
+    "candidate_resolution": 0.060137,
+    "vertices": (
+        "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"
+    ),
+    "triangles": (
+        "eNodmmO4XcsSRburEdu2nZzYN7Zt27Zt27Zt23ZyYtu6Y+dHjVk9q/fJ+77ss1bNl6uUVqKM"
+        "Uv8oyiqHo6BHQ+BZaFVIFQrHwdBoGM5hYQg0HE4oGB6NgBcWhlURVSSccDAyGoVzVBgBjYYT"
+        "CUZHY+BFhVFVTBULJxqMjcbhHBfGQOPhxILx0QR4cWFclVAlUonxElHxVBLOSWECNJlKziQZ"
+        "lUilwEsKk6qUKpVKzSQVlUylwUsJU6q0Kh1+KpgezcA5I0yDZsJJBzOjWXCDYAY0K04mmA3N"
+        "jhcEg1QOlRMnK8yF5sbLAXOoPCovTk6YD82PlwfmUQVUQZy88D+0EOfCMD9aBKcgLIoWwysM"
+        "C6viqgROEVgSLYVXHBZXpVUZnBKwLFqOc3lYCq2AUwZWRCvhlYflVWVVBacCrIpW41wdVkJr"
+        "qJp4NagqqhZedVhd1VZ18GvAumg9zvVhLbSBaojXgKqjGuE2hvXQJvgNYFO0GV5j2Fg1Vy1w"
+        "msCWaCvOrWEztA1OC9gWbYfbHrZCO+C0gR3RTridYTu0C04H2BXthtsddkJ74HSBPdFeuL1h"
+        "N7QPTg/Vl1Nv1Y++D+yj+qsBeL3hQHQQXn/YXw1WQ3AGwKHoMM7D4XA1Ao5QI+FINQqOUqPh"
+        "aDUGjlFj4SDujkPHqvFwnJrATxgCJ6KTcMaryXCSmgInq6lwipoGp6rpaga3plMT1Ez66XAW"
+        "OhvOhHPQuWoeOpearearBZzmU3PVQrWI00JqvlqslnBaTC1US9UyTkupxWq5WsFpObVUraRf"
+        "Dlehq9UadDW1Uq2lXw3XoevVBnQ9tVZtpF8PN6Gb4Ua4Bd0KN8Nt6Ha1A91ObVU71S5OO6nt"
+        "ajf9TrgH3av2oXup3Wq/OsBpP7VXHaTfDw+hh9UR9DB1UB2lPwyPocfVCfQ4dVSdVKc4naSO"
+        "q9PqjDoLz6pz8Jw6D8+rC/CCuggvqkvwkroML6sr8Iq6Cq+qa/Caug6vqxvwhroJh/H3cZo6"
+        "o26p2/w5t6iT6g6zu/A0ek/dZ3KPuqUe4N6H9zk/YH5XBfMTTquH6pF6rJ6gAT5WT9UznIfw"
+        "OfoC7yl8yu2XOM/gK/Q1XrB6Q/8SvkXf4QWr9/Rv4Af0I16w+kT/Hn5Gv+AFq6/0n+A39Dte"
+        "sPpB/xX+RH/hBavf9D/gH/QvXrBS+g9npTUq+i+OoVfaaIs6LTpYeXqjvQ6BhsQLVqF0aE6h"
+        "KK/D4AWrsDocXlgqlA6PF6wi4ITVEXRENBJesIpMH0FH1lHQqHjBKhp9ZB1NR0djwGgwJhoL"
+        "xoCx0TgwFoyLxoNxYHw0AYwHE6KJYAKYGE0CE8GkaDKYBCZHU8BkMCWaCqaAqdE0MBVMi6bj"
+        "f1ewSkedhul1BpwMOiPMqDPBTDozzKyzwCw6CAbprDCrzgaz6ewwu84Bc+icMCc/Lxc/OQ3M"
+        "jebhZ6bTeXU+TnmpXDo/5wIwD1oQP6/+DxbUhfAK6MJoAV0Er6AuSl9YF6MvooujRXQJvMK6"
+        "JCyhS+EUh8V1aV0GrwQsi5bDKw1L6/K6Ak4ZWBGthFcelteVdRWcCrAqWg2vMqysq+saOFVg"
+        "TbQW59qwGloHpwasi9bDrQ9roQ1w6sCGaCPcxrAe2kQ3xWtCNdDNcJvDRmgL/CawJdoKtzVs"
+        "hrbBaQHbou1w28NWaAecNrAj2gmvPWyvO+suOB1gV7Qb5+6wE9oDpwvsifbC6w676966D04P"
+        "2Bftx7k/7IUO0APxBlB99CDcwbAfOkQPZTKEGqCH4Q2Gg/VwPQJ/CByJjuI8Gg5Dx+CMgGPR"
+        "cbjj4Sh0As4YOBGdhDsZjkOn6Kl4U6gJehrudDgJnaFnMplBTdGzcGfDaegc/BlwLjoPbzac"
+        "refrBThz4EJ0EefFcB66BGcBXIouw10OF6ErcJbAlegq3NVwGboGZwVci67DWw1X6/V6A84a"
+        "uBHdhLcerteb9RacDXArug1vM9yst+sdOFvgTnQX591wG7oHZwfci+7D2w136/36gD6Id4Da"
+        "ow/h7Yf78Q5RB/RhfUQP4/l0GB7Vp3nWHtXH0OP6Dk/e4/ooekI/4Dl8Qh9HT+p7PJ9P6hPo"
+        "KX0r8M7QJ3lfQE6n9XHeI6f1KfSMPq2PqrP6zD8e5Y1zVh/m7XNOn9UH1XlqP9zPe+q8Psfp"
+        "gt7L++sivKAv6Qt6t7pMf1Ff4bRbXUV3q2v6KryuzzO5Tl3W1/VlfUPf1Nfwb6G71W19C97R"
+        "t+Fdaie8g97Td/VOdV/fgw/0fRisH8CHOhg+4qc81o+oJ/CJfgqf6mfwmX4On+sX8IV+CV/q"
+        "V/A6n3itH/LZN+hO9ZbaDt+g7/RbvV291+/gB/0eftQf4Cf9EX7m81/0Z+or/Kq/wW/6O/yu"
+        "f8Af+id8xK1f+hP3f6MBbmcH+KN/663qr/4DlfyFWpRsVSKf+ZTIT21ExIiFVhx04qGXEBKS"
+        "e5tVSNFoKE6bVWgJBcNIaBhWwsBwEhaGl3AwAp+JKBGoSDCSRIaRJQoUJlG5sVFFlfBoNE4b"
+        "VXSJBmNIdBhTYsBYEhPG5jNxJDafiwLjSFwYV+LBeBJfEnBjvUogsdCEnNarRJIQJpZEMIkk"
+        "hkklCUzG7eSSjEoBU0hKmFJSwVSSGqaWNDA2t9Jye61KK0nRdJzWqvSSDmaQ9DCjZICZuJtG"
+        "MlGZYWbJArNIEAySrDCrZJPs3FutsktGNAen1Sqn5IC5JCfMLblgHu5mkzxUXphX8sF8kh/m"
+        "lwKwgBSEBeU/KcTtlaqQ5EYLc1qpikhhWFSKwGLcKC7FqBKwhJSEJaUULCWlYWkpA/Nwqyy3"
+        "l6uyUhQtx2m5Ki/lYAUpDytyr5JUpCrDylIFVpGqsKpUg9WkOizGrRpSgfs10QCXs8HWkpqy"
+        "VNWWWrCO1IZ1pQ6sxyeqSz2qPqwvDWADaQgbSiPYSBrDxtJEmkpd7jdDl6rm0uwfl7Int5Dm"
+        "sli1lBawlbSEraUVbCOtYVtpA9tJW9ien9RE2lMdYAfpCDtKJ9hJOsPO0gV2ka6wq3SD3aQ7"
+        "7C49pCefX6h6Sju0F6eFqrf0gn2Y95A+VF/YV/rBftIf9pcBcIAMhANlEBwkg+FgGQKHyFA4"
+        "VIbJcDTAhWSB4XS96XtzGoHOVyNlxD/OJzWMkpES4FzSxGgZJQHOJmuMlpmkjzEyWqarsTLm"
+        "H6eTSsbJWAlwAolmvAwhH42XAaSn8TKO0wQZL73VRKo77E4WmygTOE2SidJZTabaw/Zkusky"
+        "idMUaU3umyKT0akyRZqraVRjOBWdLo1JkdNlGjpD6pM0Z8h0dKbUJo/OlBnoLKlOYp0lM9HZ"
+        "UplcO1vKk3lnyyxOc6Q0yXiOzEbnyhwpruZRhWFh8vU8mctpvsyTAmqBzP/HAiTyhbJAAsxD"
+        "al8kCyXAHCT7xbJIAgwi+y+RxRJgRpVWLZUlEmBalVItk6USYEqVVC2XZRJgUpUQJlRx1QpZ"
+        "LnHVSlnxj3FVTLVKVkqAMVVUtVpWSYBRVUS1RlZLgBFVWLVW1kiAYVVItU7WSoAhlVXrxSqB"
+        "6yTQi9Jqg6wXrTZSHm5AN4lXoeFGdLOEVuHhJnSLhFeR4WZ0q0RW0eEWdJtEV7FhbBUfbuW0"
+        "XbZJfLWDSgwTq+RwO6edskOSq12y8x+Tq9Rqt+ySAFOr9DC9yqz2yG7JrPbKnn/MrLLBbCqX"
+        "2id7JZfaL/v+MZfKpw7Ifgkwn/pPHZQDEuB/qqg6JAclwKKqpDoshyTAkqqsOiKHJcCyqqI6"
+        "KkckwIqqqjomRyXAqqomrKnqquNyTOqqE3L8H+uqhuqknJAAG6qm6pSclACbqpawpWqrTssp"
+        "aavOyOl/bKs6wo6qqzorZ6SrOidn/7Gr6qnOyzkJsKfqB/uR+y/IeRmkjuhB5L8j+gL9RQkm"
+        "4V2Uw+SJS3JRnsLHpL9LdI/VZbkkj+Ajct8VuSwBPifxXZUr8kpdk6v/+IrEd12uSYBvyXo3"
+        "5LoE+IGUd1NuSIDfSHM36b6pW3JTfqrbcusf/xDrbtP9UXfktmh9V+78oybH3ZO7EqAlw92X"
+        "exJgCNLbA7kvAYYjoz2gC6eD5YFE1A8l+B8jktQeSRQy2iN5iD6W6GS0x/IIfSKPJSaMSVJ7"
+        "KnHJZU8lNkntqTxBn8lTia+fy7N/jE9SeyHPJcCEJLWX8kICTEo6e0mXVL+Sl5Jcv5ZX/5ic"
+        "pPZGXkuAqUlSb+hS67fyRtLqd/L2H9OSqN7LOwkwNynqg7yXAPORmT7KBwnwP3LSJ/koARYj"
+        "G32WTxJgOXLPZ7py+ot8lkr6q3z5x0oknm9SjXzzTb6i36UWmea7fEN/yHepBxuRWn7QNdI/"
+        "5Yc007+oVvAn+ltakVR+yy/0j3QihfyRdqSTP/Ib/St/pJtWphv5Q5m/9Nr0I2Fo04vkoY1C"
+        "xWgzSBsj/ziIhGGNMQEOI1U4Y02Ao0gS3jgT4CRSgqebpEMYb6bpkCbEP04jK4QyIU2As0gG"
+        "oU0oE+Aitv7QdIt0GBPaLNNhTZh/XMbuH86sYtMPZ8Ki4c06tvvwJhwawWxil49gwqMRzTa2"
+        "+IgmAhrJ7GJzj2QiopHNPnb3yCYSGsUcYoePYiKjUc0BNvyoJgoazewhC0QzUdHoZgs5IrrZ"
+        "QWqIbqKhMUx0s0HHpNbAGGgss4ZsEsvERGObFeSX2CYWGscsIePEMbHRuCaOWQAXkIbimbgm"
+        "wDkkpvgmnglwCjkrPt0UncDENxN0QpPgHyeQzhKZEWS6RGYMCS6RSYgmNonMEJ2EGgATo0nN"
+        "ABJiUpMETWb6kCWTmaRoctODvJncJENTmC5k0hQmOZrSdCC3pjQp0FSmDdk2lUmJpjYtyL+p"
+        "TSo0jWlCOk5jUqNpTQNydFqTBk1n6pC105m0aHpTgzye3qRDM5gKZPkMpgrJPYNJj2Y0GUwZ"
+        "nYkqATOimU0JXRhmQrOYwroAzIwGmQKB/+fCZEGDzGl1jNNpFWSymjNqmsoGs5rs5qw6o7LT"
+        "ZzM5zDl1VuUw59U5eBY3p7mgzqucODlMLvqcJre5qC6o3OaSuggvqFwmj7msLqk8OLlNXvo8"
+        "Jp+5oi6rfPR5TX5zVV1R+XHymQLmmrqqCuDkNwXNdXVNFcQpYP6jL2gKwf9MYVjIFIGFTVFY"
+        "xBSDRU1xWMyUgMXhDXVdlYQlTClY0pSGpUwZU9aUg+VMeVjeVIAVTEVY0VSClUxlWJk/uwxV"
+        "wFThU6VNVVjFVDM31Q1Vjb6qqU5fzdTgp5WBNU0tWMvUhrVNHViHSV3uVDf1zF11U9Wjr2vq"
+        "09czDbhfAzY0jWAjTo3x65sm5r66q5rQNzZN6ZuYZtxpAJubFrAFp5bmtrqvWjJtalrRtzSt"
+        "TRvTFrblVmuqmWlnTqnbqh3TVqY9fTvTwXQ0nWAn7nagWpvO+O3hCXVKdYGdTVfudIDdTHfY"
+        "nVMP/C7wmDqhesIephfTrrA32genJzyijqm+sI/ph98L9jcD4AAzEA7EG8S0LzykjqjBcJAZ"
+        "wp1+cKgZBodxGo4/GB5Qh9QIONyMZDoEjjKj4WhOY8w+dUCNYTrCjMUfCceZ8XA8pwlmj9qn"
+        "JnBnjJlIP8FMMpPNFDiFW5OosWYq/kS4S+1R08x0M8NMoybDydyYaXaoXWom06lmFv1MM9vM"
+        "4dZsapqZizMLblM71Dw418xnOhsuMAvhQk6L8OfBLWqbWow/3yw2S8xSuJTTMvxFcJPaopbD"
+        "ZWYF08VwpVkFV3Fajb8cblCb1Bq42qxlugKuQ9fjrIHr1Aa1Aa43G/HXwk1mM9zMaUtgCteo"
+        "dWqr2Wa2m63UJriJGzvMKrVG7WC6xeyk32F2md1mD9zD3V3UVrMXfydcoVapfXCv2W8OcGs/"
+        "tcscNMvUCnUQf585ZA6bI/AI80PUfnPULFHL1FHuHDTH6I+a49w5BE+Yk/Akp1P4x+AitUSd"
+        "hqfMGabH4Vn0HM5puEAtUufhOXMB/wy8aC7BS5wu45+H89QCdQVeNleZXoDX0Os4V+AcNU/d"
+        "gNfNTfyr8Ja5DW9zuoN/A85Sc9RdeMfcM/fNA/iAW/eomyYY/y6coWaphzDYPDKPzRP4hLuP"
+        "qHvmKf5D88xMVDPUM/qn5rl5YV7Cl9x9Tj0yr5g+g0PVRPUavjJvzFvzDr7j7hvquXmP/xoO"
+        "VEPVB/jefOTOG/jJfIafOX3B/wD7qoHqK/5H89V8M9/hd04/8L+Yn/AH7KX6ql/mt/ljflHf"
+        "4Dfu/cX/aZTtpf7CbqqX0lBZscZaaK2Dzv42Qv0ynqm23nZS3VQI6G1IGMKGsqFtGBjGhoVh"
+        "+XQoSmw4piFteNtOdVLh6cPZCPThbUQYwUaCEW1kGMlGgZFtVBjFRoNRbSvVTkWz0W0MGxPG"
+        "tLFgLBsbxrZxYBwbF8blT45OhbLxbHybACawCWFCmwgmsolhYn5GPCo6jGaTwCQ2KUzKJ5Lh"
+        "xIOt+LOSw2SwmWqlUsDkNoVtpJqplDCFTWnrqUb0tVQ9lQqmtKlhKlhN1VJpYGqbxlZS1ejL"
+        "qUoqLUxj08G0sJQqp9LDdDa9LaZK0RdSxVQGmN5mhBlgflVIZYIZbSabW+Wnz65yq8wwk80C"
+        "M8MsgX9RthkC/6ocoM0Kg2AalUFltSlUGpUNZrXZYTaYRKVQOWB2m8MmUElUTpjD5rRxVAKV"
+        "C+a0uWwMFUfltlFUDBhBRYExmOWhz23z2jAqgspLn8fmsyFUGJXPGhUChsHNT5/PFrBKGVWA"
+        "Pr8taJ1SqqANpRxUuP/RF7SFbDgVShWi/88WtpFUOFXYRlORYDjcIvSFbVEbS0VTRW08FQtG"
+        "U0VsMfqitrhNpOKp4vTFbAmbTCVSJXCK25I2lUqmSuKUsKVsOpVKlcIpaUvbTCqdKm2zqkww"
+        "HW4Z+tK2rM2psqqy9GVsOZtX5VTlcMra8ragyqvK2yKqIMyLW4G+vK0IK8ASqoiqaMuoEqoS"
+        "rGgr2wqqjKpMX8lWoa8MqwT+xdzWCPyreYC2qq2jaqhqsKqtDqvBBgoPVrc1bBPVQNWENWxN"
+        "20I1UbVsG9UCtsCtbTuoNqo2Ti1bx3ZRHVQd20N1gR1w69LXsfVsH9VD1aOva+vb/qqPqm8H"
+        "q/6wD24DO1wNVg1w6tuG9A1sIztCDVeN7Eg1Ag5XDW1j+ka2iR2lRqom9I1tUztajVJN7Rg1"
+        "Go7CbUbf1Da3Y9UY1Zy+mW1hx6mxqgVOc9vSjlfjVEs7SY2H43Bb0be0re1kNUm1pm9l29C3"
+        "hlPUZNUWtrFt7VQ1hS1yKuesZpqaqtrZwbq9bWeH68G6gx2th8Phup3taMfr0bqjnazHw9G4"
+        "nex0PVl3wuloO9N3sl3sbD1dd7Hz9Ww4XXe2Xe1iPV93xeliu9F3td3tcr1Yd6fvZnvY1Xq5"
+        "7oHT3fak7wHX69W6F+xpe9nNej39dr1Z94a9bB/YG+7W23Vf2Mf2tfv1bt0P9rX97EG9X/eH"
+        "/Wx/u1cfpN+p9+oBsL8dCAfArXqnHmg36q16EBxoB8NBcK3eqAfblXqtHgIH2yF2qV6ph8Ih"
+        "dphdqJfqYXauXgiX4g6nH2ZH2Jl6rh5BP9yOtFP1TD0SZ4QdZSfqqXqUHasnwqm4o+lH2TF2"
+        "ZOBflug526GaE84YO84O1EP1OJyxdrztqwfq8Tjj7ATbU/fVE2xX3RP2xZ1oO+queiLOBDuJ"
+        "fqKdDCfBtrqjngIn2ym2pW6rp8IpdqptqlvqaXCqnWYb6qZ6Opxmp9u6uqGeAafbGbamrktf"
+        "VdfUM+EMOwvOhBV1VT0bzrKzbVldkb6kLqvnwNl2LpwDi+qSeh6ca+fZQroofX5dSM+H8+wC"
+        "OB/m0fn1QrjALrTpdR76DDq9XgQX2sVwEcyoM+glcLFdYjPpjHopXGKX2sw6E30WnVkvg0vt"
+        "crgMBukseoXNqoNgNp0VBunldiX9CrvKZtfZ9Cr6lXa1zaGz69U2p84Bs+OuoV9t18I1MKrO"
+        "qdfBtXadjaSj0ofXkfR6uM5ugOthGB1eb7AhdRi9EW6wm+BG6HRIvcmKdnoz3GS3wM3wrxK9"
+        "FW6xW+0v9Vdtg1vtNvtd/VLb4Ta73X5R39UO+059hF9wd9iP6ovaibPD7rKv1Tu1i36n3W1f"
+        "qNdqt32iXsDXuHvod9u99qF6ovbS77H77DP1UO2zL9Uz+BB3P/0+e8C+US/VAfr99qB9r96o"
+        "g/aTeg/f4B6iP2gP26/qkzpsf6iv8JM6ZI/QH7ZH7W/1Qx2lP2KP0R+FSv9Wx+Exe9warfQJ"
+        "eNyesF4bfRKesCdtKO3pw+pQ+hQ8aU/bCDqsPk1/yp6xkXUEfQbntD1ro+nI+qyNoaPByLjn"
+        "6M/a8zaWjqHP2zg6Foyhz9kL9OftRRtPx9EX6S/YSzaBjqcv2UQ6AYyHe9km0Yn0ZZxL9gr9"
+        "ZXvVJtNJ9FX6K/aaTaGT6Ws4V+11m0qn0NdxrtkbNo1OpW/gXLc3bS6dRt/EuWFv2bw6l75l"
+        "C+q8MBfubfpb9o4togvqO/S37V1bXBfRd21pXRwWwb1ny+vS+h7OXXuf/p59AO/Dyrq8fmCr"
+        "68o6GD6wD2EwrK2r60fwoX1k6+va9I11ff0YPrJP4GPYXDfWT+ET+9S21s31M/jUPrPtdWv6"
+        "zrq9fg6f2RfwOeyuO+uX8IV9aXvr7vqV7a97w9647Xm29+fp3p9zAbteNkh+WIDNYZ2sl4J4"
+        "G+AG2Sj5cPKzY6yVdfIfe8RGuFE2SV67RtbCtdwoxDaxSQpRmyWPXS1r4Bpmhe1m2SKFmW+W"
+        "3Ph5bG67SlZLESZb4BbZKrnsSlkFV3GjKBvHVilKbZOcdoWshCuZFbPbZLsUY75NcuDnZGta"
+        "LiukuN0uO2AxNLtdJsvhcm6UsDtkp5RgQ9kh2fCz22x2qSyTknan7IIl0Kw42djQlshSKWV3"
+        "yW5YEg3CyWqD7GJZIqXZX3bD3bJHsuAEsektksVSxu6RvbA0mhkni81sF8oiKctGsxfulX2S"
+        "CSczG+MCWSjl2HH2wX2yXzLiZGKrnC8LpDz7zn64Xw5IBpyMNoOdJ/OlArvPAXhADkp6O1fm"
+        "wXncqMgGdFAqUocknZ0jc+FcZpWYHJJK1GFJi5/OprWzZY5UZnIYHpYjksbOktlwNjeqsCsd"
+        "kSrUUUltZ8osOItZVSZHpSp1TFLhp7ap7AyZKdWYHIPH5LiktNNlBpzBjer2uJyQ6rYamsJO"
+        "k+lwOrMaTE5IDeqkJMdPwfY+VaZJTSYn4Uk5JcnsFJkKp3KjFtvWKalFnZZ4drJMgVOY1WZy"
+        "WmpTZyS6nSST4WRmdZickTrUWQllJ8okOIlZXSZnpS51TsROkIlwIrN6TM7JLzOB83mpR39e"
+        "6uOOlwm446mv5gLOebkgDdjbxsl4+WrGUR/NEd2Qve2IbsTGdkQ3ZmM7opuwpR3RTdnSjugG"
+        "9oIc0c3Y0o7o5jawiTWna4ke0WNlnHw0Y6k3phV72RHdml3siG7DLnZEt2X/OqKzmrZwjLwh"
+        "XY6RsehoGSPP4XMy6SgZLQE+IsOOlHuk3ZEyCh0hI+UmvEleHi5XydTDZQTaR4bLBXiBJN5e"
+        "zpDW20sftJ4cJ93Xk/ZoRaknh+Ahs98Uk4oS4H6zy+SRXWYrLIZmkq1mI8yDJpONZi3MhMaW"
+        "tWYFTIZGkBVmMYyNikSQxXCxmW8+6/lmNhSZbx7pz3o2nG2mmet6mpkEH6Hn9SQzFl5Hz+mx"
+        "ZiQ8j57VI80QeA49o4eYfvAselr3M73gGfSU7mW6wtPoMZ3dZIM5THaY0+SAuUxOmNvkgnlM"
+        "bpjX5IH5TF6Y3+SDBUx+WMYUgDVMGdjA1IBZ+fs+prOZrOak7mo6wFPoUd3MNIANuHFCdzCt"
+        "zQl9Ej2uW5tmsBmz40xam732klyWPXAvb+eLckn28X6+DC/LFdmNs4f3+GF9Ufbzrr4Cr8hV"
+        "2YWzm3f0fntVDlDXZCfOLt7UB+w1OUhdlx04O3lTH7TX5RB1Q7bj4OLdkMPUTdmGs5239mF7"
+        "U45Qt2Qrzjbe4EfsLTlK3ZYtOFt5gx+1t+UYdUc242zhPX7M3pHj1F3ZhLOZt/lxe1dOUPdk"
+        "I84m3ukn7D05Sd2XDTgb7Sm8+3KKeiDrcTbwlj9lH8hpKljW4aznXX/aBssZ6qGsxVnHG/+M"
+        "fShnqUdyjlOAj+SxnOfNH+BjeSIXeP8H+ESeykXe/AE+lWdyifd/gM/kuVzm/R/gc3khV3jz"
+        "B/hCXspV3vwBvpRXco33f4Cv5LVc5/0f4Gt5Izd4/wf4Rt5KEH/rh3WQWcRWGmQW20VwCZto"
+        "kFnKDhpklrF9BpnldhlcEdg4zUrLlmlWsWUGmdVsmUFmDftlkFnLThnEt+QIP+0wm+RNNou3"
+        "cpN6JwuYLGSjeCfv5RaTdzLfZjFBZj7+AvaKW/a9fJDbcB7+fJvZZDHz2DRu2w8yl9M8+1Hu"
+        "0N/F+yiZTGYz186xmeAnvI/ySe6xi2Q0c9jRM5pM6Ge5zy7yGf+TZDAZzWybgZplv+B/li/y"
+        "gO0kvclgZsFZdqb9ivNFvkowm0o6k97MhDNJBd/koQ2GwdxIa9KZGTYtNd1+x/8m3+URG0wa"
+        "k9ZMh9NJFz/kMXvMD/zvktpMI3ukNmnQn/LEPoaPmaUyU8knqUxq9Jc8Zb/5xfSnpDRTyDAp"
+        "TSr0tzxj1/nN9JekMCnNZJuCmmT/yHP2nj9Mf0tyk8JMssmpifavvLDP4XNmyUxyM9EmoyZY"
+        "ZV6yDynzgllSk8xMsEmp8VabV+xGmqkyScx40lcSkxQV096+gq+YJTbjSGiJmY+zxrRjczJM"
+        "xSQyY0lxiZiPtRbfGGs6kJYTmjFkvITMx1hnOtoOsAM3EpiEZrRNQI2y3nQiRXumzsQ3o0iM"
+        "8ZmPsiFMZ7J0CKbexDMjSZXxmI+0IU0XcnVIpiFMXCYjbFxquA2FH9KEMl3J23GYDIfDyaih"
+        "TTfydmj8UCa2iWOG2djUUBsGP7QJY7qTwGMxGQqHkm/D4oQxYU0PMnlME8sMgUNIwuFMT5J5"
+        "OPywJoaJaQbbGNQgG970Ip+HZxrORGcyyEanBtoIpjdZPQLT8CYak4E2GjXARsSPYCKaPra3"
+        "jcpkABxAMo9k+pLhI+FHNFFMf3J7FBMVjWz6kecjM41kIjPpZy/q1/ayvqjf2Nf2AryoL+i3"
+        "9o29BAP/Rd87+9ZegZf0Ff3evrNX4RV9VX+w7+01eFVf0x/tB3sTXtM39Sf70d6CN/Ut/dl+"
+        "srfhLX1bf7Gf7R14W9/RX+0Xexfe0Xf1N/vV3oN39T393X6z9+E9fV//sN/tA3hf15Gf9pet"
+        "I79sbakrv+1PWxenjjSVP/a3bYpTV5rJX/vHNsNpKs1Fub+2OU4zaUFwVK4FTnNpKeK0a4nT"
+        "QlrRtxTjxLWS1mgr4QvjWksbtLU4Z10baYu2Ee+cayvt0LYSwnnXTnqi7SSkC+F6Si+0p4Ry"
+        "IV0v6Y32ktAulOstw9DeEsaFdsNkKDpMwrowbqgMQYdKOBfWDZHB6BAJ78K5wTIIHSwRXHg3"
+        "SAaigySii+AGygA0wEguousPB0h/iewiuX6wv/SF/WAUF9n1gH2lh0R1UVx32EO6SzQX1XWD"
+        "3aWrRHfRXFf6bvJVx3Df9Fcd08VwX+BX/UXHcjHdK/hFv9KxXSz3Er7SL3UcF9u9gC/1Cx3X"
+        "xXHP4Qv9XMdzcd0z+Fw/0/FdPPcUPtNPdQIX3yV0CTg/0QlhIk5P9GP0iU7sErnH+gYaYBKX"
+        "2F2GN/RlvoFJXFL3UL/WSV2wfggf6GD4g29AUvdaJ2OanFNSlwxN4d7qdzqFe6Pfwtf6DUyG"
+        "pnAp0RQuFZoapoAf9Eed2r3XH+A7/R6mQFO7NMxTu7RoOvSjTud+6d/wk/4FP+pPMD3zdC4D"
+        "mo4utcvofus/OiNOOvp0nDK6TJwyusxoFvSPzuL+aiVZ6P7qIPyMLshlRYNcNjQ75ywwi1OS"
+        "3YWS0DCkhIJaQkIlGgZxKwfMDrOhOVxONIfLheZGs8PwElVyu3ASHoaVcDCMhIWhJQzMjubh"
+        "fg6Xx+VF87h8aH4XQ2JKfhddYsBoEh1GlWgwDzfz81Oj0udAC+DkhwX5XAEqD/yPUyGXUBJJ"
+        "IZdAEsJYkgDGlFiwAPcLUTGlsCvC3cKuKFqYrgAswKwYlUiKuaSSFiaRpDCxJIGJJDEszLy4"
+        "K8HniruSaHG6wq4UGmBhPl/KZZCMUsqllwwwnaSHaSUdLIaW5lPFXWlXBi3tyqKlOZdy5VwO"
+        "ySnlXHbJATNKdlj6n1+KU3lXgbvlXUW0PF1pV8nllkJSyeWS3DCn5ILl0ErMyjEtj1Z2VfhE"
+        "ZVcVrYxTCVZEq7nCUkSquUJSGFZCq7kiUhm/MqfqrqyUk+quBp+r7mqi1fGL4FRFa7miUlZq"
+        "cS4Ky+LWYl5EarvyUgGWk/KwDp+r7eqitZmWw6mJ1nM1pKbUcxWkBqzPvJ5rgNbjVgWcumhD"
+        "TjWloWvEpKH7ZRvBBngNXW2erA1dLanNtKbUksauiYvuGlNd6TtLE/ou0pm+q3SRpq4Z86au"
+        "OdqUrjNOR+kAO0lH2Fk6SQumTV0LqgN9S04tXCu0hWssjXCaSGPYQZpIa9eGSWvXFm1N1wI2"
+        "kPr4DaUBbCQNYQu0HZP6sD1327kOaDvO1XHaMunoqklV6eiqSzXYDu3oqjLr5Dpzt5Prgnai"
+        "CzjtmHR1laQMrCyVYBWpDKtKFdgJ7cb9Tq6b6452cz3Qnmgn2Ml1hSWlhPR0paQkLC2lYBkp"
+        "DbuivbjfzfVyvdFerg/al0+UkL6cutEXlAL0/0lBWFz+gyWkOOzGrX7c7wX7o/3cAHSgyyvZ"
+        "ZKDLJ3lhfskHC0h+2I+bA/l5Beh7oYO43w8ORge5IehQ5tlkqMsimWGQZIFZJQhmk6ywH/Oh"
+        "3O3nhrnhfGKYG4EOoxvkRlJDYSpJKSNdakkF00hqmFnSwGH/7gzlNIpPDXOj3Gh0lBuDjmWS"
+        "Usa65BIfppDkMKWkgMOYjOXWMDfOjefuODcBHUc3yk1EAxzFjYkursSRiS6exIXxJR4ci07i"
+        "/jg3yU1GJ7kp6FTOE+FEF0emuigSGcaRKHASk2ncmQSno9PcDHSmiyghZKaLJBFhZIkEJ/H5"
+        "mVRk+hAyjX4a3iznxcksHA9n8+lZbg46i2kInBnoXJxZcJZzMtexukInFs5jMtfNRxe4n/qH"
+        "XuCM/ITzcRdQRha4H3oh/SK8BW4huth919/0YvzvcCG6mPd0DPwlnBbztl7itpgNZqlbhi51"
+        "O8wWs8wtdzvNDrOc0zK31+ykW4Eud/sC//2CW+kOmn1mJacV7qg5SLcKXemOmaNmlVvtTplj"
+        "ZjWnVe60OUW3Bl3tzpnTZo1biwZ43pwzl815s9atc5f/8Qrn9XCdW++umyvmhrnOeYO78Y93"
+        "OG+EG9xGd9fcoQ82d80muNFtcg9NMP1T89BshpvcZvfMPDVb4Ga3xb0yz8xWuMVtda/NK7MN"
+        "bnXb3Hvz2myH29x298G8p/9iPpgdcLvb4X6YL2Yn3OF2up/mh9kFd7pd7q/5aXbDXW63U/av"
+        "2QN3uz1OW2X3OG+13Qv3uL0uhPV2H9zr9rmQNoTd78LbcDAk7n4Xzoa0B1wEGx5GtBFgeGYH"
+        "XSQb0R7EOeAO0R+EkW0ke8hFsZHtYRfVRoHRbFQYBfeIS2Kj2SMuqU0Co+EedfFtUnvUJbDx"
+        "YVLcYy6hTWCPuUQ2IUyAe9wltonscRfDJoYxbQyYiNkJ+uMwlo1pT7jYNpY96eLY2DCujQNj"
+        "455yoW1ce8qFsaFhXNzT9KdgWBvGnnHGhoVEKBjWnnZnWXytPQvOuHPut3H2nPtjfptz+Gfd"
+        "effN/DHncc65C+67+WYuuE/mO/yGe9F9Np/MRZwL7pJ7az6bSzgX3WX3zrw1l90L8w6+xb3i"
+        "XpoX5grOZXfVPTYvzVWcK+6JeUx3DQ3wvnlirsNr7rp7YO6bG/C6u+FumQfmtrnF+aa7Da8F"
+        "/osWdwsN8KLhDG+52+6SuWjOmkuc77iz8ASnO+4uesedNCfMXXcPvesOm5PmnruPBnjEHDYH"
+        "zBFz3z1wB+BuTg9cMPrA7TG7TbDbZvbAh2iw2262mYduqdtg1ptNZjv9OrPZPHKP0UdupVln"
+        "HrsnbpVZaZ5weuyWmFV0T9EnbqlZYp66Z26BWWqecXrqFpoFdM/RZ26OWWieuxduupljXnB6"
+        "7maY6XQv0RdusplhXrpXaIBTzGQzzkwxr9xrN+4fx3N+A1+7N26UGW9Gm1Gc37rR/ziU8zv4"
+        "1r1zw8xQ+v5mmHkP37n3boDpTz/QDDAf4Hv3wfU2A81H+MF9dN1Mb/MJfnSfXHfTzXyGn9xn"
+        "19F0p+9kOpov8LP74tqYTuYr/OK+uramjfkGv7pvrrlpa77Db+67a2Gamx/wu/vhGpoW5if8"
+        "4X66RqYhfU3TyPyCP90vV8vUNL/hL/fb1Ta1zB9X1tSBtXH/uDqmtvnrypmysLwpB8syU76C"
+        "KW+UL89Z0yuvfUVTwWhfyVQ04iubSrCgqQwr4Rr/nylojC9k/oMFca0vbAoZ64uYwrAQrvNF"
+        "TRHjfDFTFBY3xWARZp7ewRKmuPG+pClhQvhSpiQsbUrBkrghfRVT2oT0VU0VWBo3lK9mqppQ"
+        "vrqpBqvihqYPBeua6iaMr2fqwvqmHqxrQvuwvrGpb8LihPHhfBPT2ITzTU0T2Bg3vG9pmprw"
+        "OOF8BN/KtDQRfDvTCrbEjejbm3YmIk4EH8l3Nu1NJJyIPrLvYjqbyL6H6QI740bxPU0PEwUn"
+        "so/q+5ieJipOFN/X9KGLhgY4yPQ10WE0H90PNoNMDBjdx/DDzWAzwgznHNOPgGM4xfSx0AAn"
+        "mDEmNozlY/uJZoKZaiZyjuOnwpmc4vi4aBw/y8w0cX08NK6fa2aZeD4+GuA8M9csMvNMfJ/A"
+        "L4LLOCXwCf1ys8wk5JTArzbL6RKhCf0as9ok8o/cZn4/15s19K9tYp/Ev7FJfWKYmPNbm8wn"
+        "9W9x3th3NrlP5t/hvLXvbQqf3L/HeWc/2JQ+hf+A895+tKl8Sv8R54P9ZFP7VP4Tzkf72abx"
+        "qf1nnE/2i03r0/gvOJ/tV5vOp/Vfcb7Yb/RfYXqfzn+H3+x3m8Gn9z/gd/vDZvQZfHKXkXNy"
+        "l8ln9MlgcnJtZp/Jp4TJSLdZfGafCqYkxQb5LD4NTEWWzeqDfFqYhryazWf16WFa8mt2n81n"
+        "gOlJqzl8dp8JZiCz5vQ5fGaXy+eEOXGzutw+l8+Kk5nEmcfn9tlwspI78/o8PidONtJkPp/X"
+        "58LJGciUnhNOrkBS9Jxw8pIUC/oCviBOPhLgf76gJz1yLuIK+f88+ZAz6c4X8kVxipD2ivjC"
+        "vgROUdJbUV/El8QpQYYrSlfGFfNFfVlYhoRW3BfzFWBZElsJX9xXhBVIXyV9CV8FViSTlfIl"
+        "fVVYhWRV2pfyNWBV8lYZX9rXhDVITWV9GV8H1iRLlfNlfV1Yh6RU3pfz9WFd8lMFX943gPVJ"
+        "ShV9Bd8INiBBVfIV/S9bifMvW9lX8j/hL/vTVvGV/W/40/62VX0V/wf+tn9sNV/V/4V/7F9b"
+        "3VfzylXnrFwNX91rqJx2NX0NFs6anMXV8jW9cbV9LVgL17o6vra3OMY5V9fX8Q7HOu/q+bre"
+        "4zgXwtX39XwIHO9C0oeADXx9HwqGdKFcQ9/Ah4ahXGjXyDf0YWBoF8Y19o18WBjGhXVNfGMf"
+        "DoZ14VxT38SHh+FceNfMN/URYHgXwTX3zXxEGMFFdC18cx8JRnSRXEvfwkeGkVxk18q39FFc"
+        "a98KtsKN6tr41j4qThQXzbX1bXw0nKgkzHa+rY+OE40k2d63801wopMsO/j2vhlOE7JjR9/B"
+        "N8dpRoLs5Dv6ljjNyYqdfSffCqcl2bGL7+zb4LQiDXb1XXxbnDZkxG6+q2+P05bs19138x1w"
+        "2pMFe/juvjNOBxJeD7ourqfHg11Ie708J9idDNfb9/K9XR/fG/bG7RPoYV/fx/d3/XxfSB9I"
+        "a76fJ4NxJoP5/n4wzgDS1EA/wA/BGUy6GuQH+uE4Q0hLg/0gPwJnOJlpiB/sR+OMIAsN9UP8"
+        "GJzRZKNhfqgfjzOGxDPcD/MTcMaTe0b44X4yzgSSzUg/wk/BmUy+GeVH+uk4U8gno/0oPwNn"
+        "OqlljB/tZ+PMIJeM9WP8HJzZpJNxfqyfhzOHFDLej/PzceaRRSb48X4RznySx0Q/wS/EWUT+"
+        "mEi3xE3yE30MuIRMMtlP8jFhDBfTTfGTfSwY08VyU/0UHxvGcrHdND/Vx4GxXRw33U/zcWEc"
+        "F9fN8NN9PBjXxXMz/QwfH8Zz8d0sP9MngPFdAjfbz/IJYQKX0M3xs30imNAlcnP9HJ8YJnKJ"
+        "3Tw/1ydx8/08OA/3tU3i5/Ncn8/5ChtoB3+F6ugvwctsp+35Rl3lW9QJXkEv4lxig23Ht+4a"
+        "36jO8Cp6Aeciu25bvpnX+XZ1gdfQ8zgX2Ifb8O29wTetK7yOnsM5z+bcmm/4TXbVrrAr37qz"
+        "OOfYrlvxW3CLb2B3eBM9g3PWneG3ppW/zfbaHXbne3ga5wxbegt+j+7w/ewJb6OncE6z1Tfn"
+        "d+0uW21P2JPv50mcU+4kv6HN/T023F6Qb60/we9vM9iMG/fZdnv7+1Qffxz/BMmiCb/XD/g+"
+        "94X30WM8B5rAJtwIZv/t64Opfv4oz4rGsDGzh4FvuH/IvJ8/wvOkEWzEbJPh2+43sQH394d5"
+        "5jSEDZkdoj8M6/EsOsRzqYE/SH/IHeCpVc8foD9IwqrNM20/z7S6sC7uPpz95LJaPPf20u8j"
+        "tdXgqbiHJ2QtWAt3N84eWJ0n5y64m/RXjSfqTvpdpMKqPGl34OwkM1al2+6q8BzeBreTKCvz"
+        "fN7Kk7wyrIy7hWd7Jb8FZyuZtCJdBZ7ym3kTVPjHzWTXjegm3hPl/UbeHOX+cQMZuCzdBt4r"
+        "Zf16uJ6EXJq3yzreQKX/cR0puiTvoQDXkLpL0q3hvVXSr+ZNVuIfV5HVi9Ot4j1X3K+EK0ny"
+        "Rf0KEn5R3nkreCMW9ct5Ry4n/xfmHbmcd+dSt94U8stIIIV4gy7jzVrIB5LIAJ4zj3jODIKb"
+        "zED/mOfMYPgIfcJzZgh8jD7lOTMUPkGf8ZwZBp+iz3nODIfP0Bc8Z0bA5+hLnjMj4Qv0Fc+Z"
+        "UfAl+prnzGj4Cn3Dc2YMfI2+5TkzFr5B3/GcGQffou9JHuN4xryHH8gc43nGfIAfSRsTeLp8"
+        "ImlM5DSBp8snukn+M3ljMpzEM+YLeWMKnMwz5itJYyqcwjPmG0ljGpzKM+Y7SWM6nMYz5gdJ"
+        "YwaczjPmJ0ljJpzBM+YXSWMWnMkz5jcZYzacxTPmDxljDpzNM+Yv6WIunMMzRqHz4FyeNBqd"
+        "D+dBQZNAnjdkCBIFfweJAlsPmhgnCZumRdmJ2EoLUAnZNy1uUvKEZW9KyC6bn0lCdk+Hm4wk"
+        "4ditErDv5mOSgD00BF5yKhn7V3w247xM4rOThmSSgkrOjhaP7TkPk3jsp6GYpKRSsMflwc9N"
+        "xWFXDc0kFZWSXS8OW3guJnHYW8MwSU2lYh+Mzaaek0lsdtiwTNJQqdkWY7HT52ASi302HJO0"
+        "VBo2ypjs/dmZxGSrDc8kHZWWrTM7fjYqOhtuBCbpqXRsptHJD1mZRGfbjcgkA5We7TUrfhAV"
+        "lc03EpOMVAY23CCcLFQUtuDITDJRGdmCo3DKzCQKjIz7P85hzBs="
+    ),
+}
+
+HAUSDORFF_SAMPLES = 2000
 
 
 # ═══════════════════════════════════════════════════════════
@@ -247,6 +666,457 @@ def _radial_distance(shape, origin, direction, max_r=20.0):
         dz = pt.Z() - origin.Z()
         return math.sqrt(dx * dx + dy * dy + dz * dz)
     return None
+
+
+# ═══════════════════════════════════════════════════════════
+# Hausdorff distance helpers
+# (copied verbatim from cad_fingerprint.hausdorff / .analyze)
+# ═══════════════════════════════════════════════════════════
+
+def decode_mesh(payload: dict) -> tuple[list, list]:
+    """Decode an :func:`encode_mesh` payload back into (vertices, triangles)."""
+    if payload and payload.get("truncated"):
+        raise ValueError(
+            "this fingerprint's surface mesh was truncated for display; "
+            "re-run the analysis with --json to write the full mesh"
+        )
+    if not payload or not payload.get("vertex_count"):
+        return [], []
+    lo = payload["bbox_min"]
+    hi = payload["bbox_max"]
+    scale = [(hi[a] - lo[a]) / 65535.0 if hi[a] > lo[a] else 0.0
+             for a in range(3)]
+
+    vbuf = zlib.decompress(base64.b64decode(payload["vertices"]))
+    raw = struct.unpack(f"<{len(vbuf) // 2}H", vbuf)
+    vertices = [
+        (lo[0] + raw[i] * scale[0],
+         lo[1] + raw[i + 1] * scale[1],
+         lo[2] + raw[i + 2] * scale[2])
+        for i in range(0, len(raw), 3)
+    ]
+
+    tbuf = zlib.decompress(base64.b64decode(payload["triangles"]))
+    if payload.get("index_bits", 16) == 16:
+        flat = struct.unpack(f"<{len(tbuf) // 2}H", tbuf)
+    else:
+        flat = struct.unpack(f"<{len(tbuf) // 4}I", tbuf)
+    triangles = [flat[i:i + 3] for i in range(0, len(flat), 3)]
+    return vertices, triangles
+
+
+def _point_triangle_distance2(p, a, b, c) -> float:
+    """Squared distance from point p to triangle (a, b, c).
+
+    Voronoi-region algorithm (Ericson, *Real-Time Collision Detection*):
+    classify p against the triangle's vertex/edge/face regions, then
+    project onto whichever feature is closest.
+    """
+    abx, aby, abz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    acx, acy, acz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    apx, apy, apz = p[0] - a[0], p[1] - a[1], p[2] - a[2]
+
+    d1 = abx * apx + aby * apy + abz * apz
+    d2 = acx * apx + acy * apy + acz * apz
+    if d1 <= 0.0 and d2 <= 0.0:
+        return apx * apx + apy * apy + apz * apz
+
+    bpx, bpy, bpz = p[0] - b[0], p[1] - b[1], p[2] - b[2]
+    d3 = abx * bpx + aby * bpy + abz * bpz
+    d4 = acx * bpx + acy * bpy + acz * bpz
+    if d3 >= 0.0 and d4 <= d3:
+        return bpx * bpx + bpy * bpy + bpz * bpz
+
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        denom = d1 - d3
+        v = d1 / denom if denom != 0.0 else 0.0
+        dx, dy, dz = apx - v * abx, apy - v * aby, apz - v * abz
+        return dx * dx + dy * dy + dz * dz
+
+    cpx, cpy, cpz = p[0] - c[0], p[1] - c[1], p[2] - c[2]
+    d5 = abx * cpx + aby * cpy + abz * cpz
+    d6 = acx * cpx + acy * cpy + acz * cpz
+    if d6 >= 0.0 and d5 <= d6:
+        return cpx * cpx + cpy * cpy + cpz * cpz
+
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        denom = d2 - d6
+        w = d2 / denom if denom != 0.0 else 0.0
+        dx, dy, dz = apx - w * acx, apy - w * acy, apz - w * acz
+        return dx * dx + dy * dy + dz * dz
+
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        denom = (d4 - d3) + (d5 - d6)
+        w = (d4 - d3) / denom if denom != 0.0 else 0.0
+        dx = p[0] - (b[0] + w * (c[0] - b[0]))
+        dy = p[1] - (b[1] + w * (c[1] - b[1]))
+        dz = p[2] - (b[2] + w * (c[2] - b[2]))
+        return dx * dx + dy * dy + dz * dz
+
+    denom = va + vb + vc
+    if denom == 0.0:  # degenerate triangle — fall back to vertex a
+        return apx * apx + apy * apy + apz * apz
+    v = vb / denom
+    w = vc / denom
+    dx = apx - (v * abx + w * acx)
+    dy = apy - (v * aby + w * acy)
+    dz = apz - (v * abz + w * acz)
+    return dx * dx + dy * dy + dz * dz
+
+
+def _mesh_area(tris) -> float:
+    """Total area of a list of (a, b, c) vertex triples."""
+    total = 0.0
+    for a, b, c in tris:
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        total += 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+    return total
+
+
+class TriangleGrid:
+    """Uniform spatial grid over a triangle mesh for nearest-surface queries.
+
+    Each triangle is registered in every cell its bounding box touches.
+    A query walks outward in cubic shells around the query point's cell and
+    stops once the best distance found is closer than any unvisited shell
+    could possibly be.
+    """
+
+    def __init__(self, vertices, triangles, target_per_cell: float = 3.0):
+        self.tris = [
+            (vertices[i], vertices[j], vertices[k]) for i, j, k in triangles
+        ]
+        xs = [v[0] for v in vertices]
+        ys = [v[1] for v in vertices]
+        zs = [v[2] for v in vertices]
+        if not xs:
+            self.cells = {}
+            self.cell = 1.0
+            self.dims = (1, 1, 1)
+            self.origin = (0.0, 0.0, 0.0)
+            return
+        pad = 1e-6
+        self.origin = (min(xs) - pad, min(ys) - pad, min(zs) - pad)
+        span = (
+            max(xs) - min(xs) + 2 * pad,
+            max(ys) - min(ys) + 2 * pad,
+            max(zs) - min(zs) + 2 * pad,
+        )
+        # Size the cell from surface area, not bounding-box volume: the
+        # triangles form a 2D sheet inside the box, and a flat part has no
+        # volume to divide by at all. Occupied cells go as area / cell², so
+        # cell = sqrt(target_per_cell * area / triangle count) puts roughly
+        # target_per_cell triangles in each.
+        area = _mesh_area(self.tris)
+        count = max(len(self.tris), 1)
+        if area > 0.0:
+            self.cell = math.sqrt(target_per_cell * area / count)
+        else:
+            self.cell = max(span) / 8.0
+        # Never so fine that one triangle spans a huge number of cells.
+        self.cell = max(self.cell, max(span) / 512.0, 1e-9)
+        self.dims = tuple(max(int(s / self.cell) + 1, 1) for s in span)
+        self.max_ring = max(self.dims)
+
+        cells = {}
+        ox, oy, oz = self.origin
+        c = self.cell
+        for idx, (a, b, cc) in enumerate(self.tris):
+            i0 = int((min(a[0], b[0], cc[0]) - ox) / c)
+            i1 = int((max(a[0], b[0], cc[0]) - ox) / c)
+            j0 = int((min(a[1], b[1], cc[1]) - oy) / c)
+            j1 = int((max(a[1], b[1], cc[1]) - oy) / c)
+            k0 = int((min(a[2], b[2], cc[2]) - oz) / c)
+            k1 = int((max(a[2], b[2], cc[2]) - oz) / c)
+            for i in range(i0, i1 + 1):
+                for j in range(j0, j1 + 1):
+                    for k in range(k0, k1 + 1):
+                        cells.setdefault((i, j, k), []).append(idx)
+        self.cells = cells
+
+    def nearest_distance(self, p) -> float:
+        """Distance from p to the closest point on the mesh surface."""
+        if not self.tris:
+            return float("inf")
+        c = self.cell
+        ox, oy, oz = self.origin
+        ci = int((p[0] - ox) / c)
+        cj = int((p[1] - oy) / c)
+        ck = int((p[2] - oz) / c)
+        inside = (
+            0 <= ci < self.dims[0]
+            and 0 <= cj < self.dims[1]
+            and 0 <= ck < self.dims[2]
+        )
+        if not inside:
+            # Outside the mesh's grid: the shell bound below assumes p sits
+            # in its own cell, so fall back to an exhaustive scan. Only
+            # happens for points well clear of the reference surface.
+            best2 = float("inf")
+            for tri in self.tris:
+                d2 = _point_triangle_distance2(p, tri[0], tri[1], tri[2])
+                if d2 < best2:
+                    best2 = d2
+            return math.sqrt(best2)
+
+        best2 = float("inf")
+        checked = set()
+        cells = self.cells
+        tris = self.tris
+        ring = 0
+        while ring <= self.max_ring:
+            for i in range(ci - ring, ci + ring + 1):
+                for j in range(cj - ring, cj + ring + 1):
+                    for k in range(ck - ring, ck + ring + 1):
+                        # only the shell surface, inner cells already done
+                        if ring and (
+                            abs(i - ci) != ring
+                            and abs(j - cj) != ring
+                            and abs(k - ck) != ring
+                        ):
+                            continue
+                        for idx in cells.get((i, j, k), ()):
+                            if idx in checked:
+                                continue
+                            checked.add(idx)
+                            tri = tris[idx]
+                            d2 = _point_triangle_distance2(
+                                p, tri[0], tri[1], tri[2]
+                            )
+                            if d2 < best2:
+                                best2 = d2
+            # A triangle first appearing at shell ring+1 is at least
+            # ring*cell away from p, so this bound is safe.
+            if best2 <= (ring * c) ** 2:
+                break
+            ring += 1
+        return math.sqrt(best2)
+
+
+def _radical_inverse(n: int, base: int) -> float:
+    """Van der Corput radical inverse — a deterministic low-discrepancy value."""
+    result = 0.0
+    inv = 1.0 / base
+    f = inv
+    while n > 0:
+        result += (n % base) * f
+        n //= base
+        f *= inv
+    return result
+
+
+def sample_mesh_points(vertices, triangles, count: int) -> list:
+    """Sample ``count`` points spread over the mesh surface, area-weighted.
+
+    Deterministic: triangles are picked by stratifying the cumulative-area
+    axis and barycentric coordinates come from a Halton sequence, so no
+    random number generator is involved and results are reproducible across
+    machines and Python versions.
+    """
+    if not triangles or count <= 0:
+        return []
+    cumulative = []
+    total = 0.0
+    for i, j, k in triangles:
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        total += 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+        cumulative.append(total)
+    if total <= 0.0:
+        return []
+
+    points = []
+    for n in range(count):
+        target = (n + 0.5) / count * total
+        t_idx = min(bisect.bisect_left(cumulative, target), len(triangles) - 1)
+        i, j, k = triangles[t_idx]
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        r1 = _radical_inverse(n + 1, 2)
+        r2 = _radical_inverse(n + 1, 3)
+        s = math.sqrt(r1)
+        w0 = 1.0 - s
+        w1 = s * (1.0 - r2)
+        w2 = s * r2
+        points.append((
+            a[0] * w0 + b[0] * w1 + c[0] * w2,
+            a[1] * w0 + b[1] * w1 + c[1] * w2,
+            a[2] * w0 + b[2] * w1 + c[2] * w2,
+        ))
+    return points
+
+
+def _distance_stats(distances: list) -> dict:
+    """max / mean / rms / 95th percentile of a distance list."""
+    if not distances:
+        return {"max": 0.0, "mean": 0.0, "rms": 0.0, "p95": 0.0}
+    n = len(distances)
+    ordered = sorted(distances)
+    return {
+        "max": ordered[-1],
+        "mean": sum(ordered) / n,
+        "rms": math.sqrt(sum(d * d for d in ordered) / n),
+        "p95": ordered[min(int(0.95 * n), n - 1)],
+    }
+
+
+def hausdorff_distance(mesh_a, mesh_b, samples: int = 2000) -> dict:
+    """Two-sided approximate Hausdorff distance between two meshes.
+
+    Args:
+        mesh_a: (vertices, triangles) of the reference mesh.
+        mesh_b: (vertices, triangles) of the mesh being compared.
+        samples: points sampled per direction; must be positive.
+
+    Returns a dict with ``forward`` (A→B), ``backward`` (B→A) and combined
+    ``hausdorff`` / ``mean`` / ``rms`` / ``p95`` values, all in model units.
+    """
+    if samples < 1:
+        # Zero samples would report a flawless match for any pair of shapes.
+        raise ValueError(f"samples must be at least 1, got {samples}")
+
+    va, ta = mesh_a
+    vb, tb = mesh_b
+    grid_a = TriangleGrid(va, ta)
+    grid_b = TriangleGrid(vb, tb)
+
+    pts_a = sample_mesh_points(va, ta, samples)
+    pts_b = sample_mesh_points(vb, tb, samples)
+    fwd = [grid_b.nearest_distance(p) for p in pts_a]
+    bwd = [grid_a.nearest_distance(p) for p in pts_b]
+
+    f_stats = _distance_stats(fwd)
+    b_stats = _distance_stats(bwd)
+    both = _distance_stats(fwd + bwd)
+    return {
+        "samples": samples,
+        "forward": f_stats,
+        "backward": b_stats,
+        "hausdorff": max(f_stats["max"], b_stats["max"]),
+        "mean": both["mean"],
+        "rms": both["rms"],
+        "p95": both["p95"],
+    }
+
+
+def _triangulate(shape, deflection, angular_deflection, remesh):
+    """Return (vertices, triangles) for a shape, meshing it first if asked.
+
+    Meshing writes a triangulation into the shape, so a copy is meshed and
+    the caller's shape is left exactly as it was — generated tests must not
+    mutate the fixture they are handed.
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.BRepTools import BRepTools
+    from OCP.TopLoc import TopLoc_Location
+
+    target = shape.wrapped
+    if remesh:
+        target = BRepBuilderAPI_Copy(target).Shape()
+        BRepTools.Clean_s(target)
+        BRepMesh_IncrementalMesh(
+            target, deflection, False, angular_deflection, True
+        )
+
+    vertices: list = []
+    triangles: list = []
+    explorer = TopExp_Explorer(target, TopAbs_FACE)
+    while explorer.More():
+        face = TopoDS.Face_s(explorer.Current())
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            explorer.Next()
+            continue
+        transform = loc.Transformation()
+        flipped = face.Orientation() == TopAbs_REVERSED
+        offset = len(vertices)
+        for i in range(1, tri.NbNodes() + 1):
+            pnt = tri.Node(i).Transformed(transform)
+            vertices.append((pnt.X(), pnt.Y(), pnt.Z()))
+        for i in range(1, tri.NbTriangles() + 1):
+            n1, n2, n3 = tri.Triangle(i).Get()
+            if flipped:
+                n2, n3 = n3, n2
+            triangles.append((offset + n1 - 1, offset + n2 - 1, offset + n3 - 1))
+        explorer.Next()
+    return vertices, triangles
+
+
+_HAUSDORFF_CACHE = {}
+
+
+def _shape_signature(shape):
+    """Cheap key identifying a shape's geometry (not its object identity).
+
+    Volume and envelope alone would collide on exactly the differences
+    this test exists to catch — a mirrored part, or a feature moved
+    within the same envelope — so the centre of mass and surface area
+    go in too.
+    """
+    volume = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape.wrapped, volume)
+    surface = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(shape.wrapped, surface)
+    com = volume.CentreOfMass()
+    bb = shape.bounding_box()
+    return (
+        round(volume.Mass(), 9), round(surface.Mass(), 9),
+        round(com.X(), 9), round(com.Y(), 9), round(com.Z(), 9),
+        round(bb.min.X, 9), round(bb.min.Y, 9), round(bb.min.Z, 9),
+        round(bb.max.X, 9), round(bb.max.Y, 9), round(bb.max.Z, 9),
+    )
+
+
+def _hausdorff_vs_reference(shape):
+    """Two-sided surface deviation between `shape` and the reference mesh.
+
+    Keyed on the shape's geometry rather than on `id()`, because a
+    function-scoped pytest fixture hands each test a freshly built part —
+    the max and mean tests would otherwise pay for the whole measurement
+    twice.
+    """
+    key = _shape_signature(shape)
+    if key in _HAUSDORFF_CACHE:
+        return _HAUSDORFF_CACHE[key]
+    reference = decode_mesh(REF_MESH)
+    deflection = REF_MESH["deflection"]
+    angular = REF_MESH["angular_deflection"]
+    actual = _triangulate(shape, deflection, angular, True)
+    # The reference mesh was capped; cap this one too, or a part with far
+    # more detail makes these pure-Python distance queries crawl.
+    attempts = 0
+    while len(actual[1]) > REF_MESH["max_triangles"] and attempts < 6:
+        deflection *= 1.7
+        angular = min(angular * 1.3, 1.0)
+        attempts += 1
+        actual = _triangulate(shape, deflection, angular, True)
+    result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
+    # Coarsening costs accuracy, so the floor has to move with it. Chord
+    # error scales with the deflection the mesh was built at, which is
+    # all this needs: reading it off the candidate's own facets would let
+    # the part under test widen the tolerance it is judged by.
+    candidate_error = REF_MESH["candidate_resolution"] * (
+        deflection / REF_MESH["deflection"]
+    )
+    result["floor"] = 2.0 * (REF_MESH["resolution"] + candidate_error)
+    result["deflection"] = deflection
+    if len(_HAUSDORFF_CACHE) > 4:
+        _HAUSDORFF_CACHE.clear()
+    _HAUSDORFF_CACHE[key] = result
+    return result
 
 
 # ═══════════════════════════════════════════════════════════
@@ -405,6 +1275,55 @@ class TestRadialProfile:
             assert abs(actual_r - ref_r) < 0.15, (
                 f"Radial at Z={pos} angle={deg}°: {actual_r:.4f} vs ref {ref_r:.4f} — {hint} material"
             )
+
+
+# Surface-deviation tolerance raised: mean 0.05 -> 0.063026 mm.
+# The meshing error is 0.1261 mm — this reference mesh plus
+# the mesh the part under test is measured against. Two triangulations of one
+# surface differ by about that much, so anything tighter would flag meshing
+# noise as a defect.
+# Export the STL more finely, or state its tolerance with --stl-facet-error,
+# for a tighter check.
+
+class TestSurfaceDeviation:
+    """Hausdorff distance — worst-case point-to-surface deviation.
+
+    Volume, area and cross-sections are aggregates: they can all agree
+    while the surface is locally wrong. These tests sample points on both
+    surfaces and measure how far each one is from the other surface.
+    """
+
+    def test_max_deviation(self, part_under_test):
+        """No sampled point on either surface is further than the tolerance.
+
+        This is a sampled estimate, not a proof: with HAUSDORFF_SAMPLES
+        points per direction against 3402
+        reference triangles, a defect confined to a few triangles can be
+        missed. Raise --hausdorff-samples to sample the surface harder.
+        """
+        result = _hausdorff_vs_reference(part_under_test)
+        tolerance = max(0.3, result["floor"])
+        fwd = result["forward"]["max"]
+        bwd = result["backward"]["max"]
+        side = "missing material" if fwd > bwd else "excess material"
+        assert result["hausdorff"] < tolerance, (
+            f"Hausdorff distance {result['hausdorff']:.4f}mm exceeds "
+            f"{tolerance:.4f}mm over {result['samples']} "
+            f"samples/direction (ref→part {fwd:.4f}, part→ref "
+            f"{bwd:.4f}, 95th pct {result['p95']:.4f}) — worst area "
+            f"looks like {side}"
+        )
+
+    def test_mean_deviation(self, part_under_test):
+        """The surfaces agree closely on average, not just at worst case."""
+        result = _hausdorff_vs_reference(part_under_test)
+        tolerance = max(0.063026, result["floor"] / 4.0)
+        assert result["mean"] < tolerance, (
+            f"Mean surface deviation {result['mean']:.4f}mm exceeds "
+            f"{tolerance:.4f}mm (RMS {result['rms']:.4f}, 95th pct "
+            f"{result['p95']:.4f}) — the whole surface is off, not just "
+            f"a local feature"
+        )
 
 
 class TestBuildQuality:

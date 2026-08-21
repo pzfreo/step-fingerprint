@@ -7,6 +7,7 @@ their procedural implementation as a fixture.
 
 from __future__ import annotations
 
+import inspect
 import json
 import textwrap
 from pathlib import Path
@@ -38,6 +39,9 @@ def generate_test_file(
     cross_section_moment_tol_pct: float = 5.0,
     radial_tol_mm: float = 0.15,
     face_area_tol_pct: float = 5.0,
+    hausdorff_tol_mm: float = 0.3,
+    hausdorff_mean_tol_mm: float = 0.05,
+    hausdorff_samples: int = 2000,
 ) -> str:
     """Generate a pytest file that validates a Part against the fingerprint.
 
@@ -58,6 +62,9 @@ def generate_test_file(
         cross_section_centroid_tol_mm: Cross-section centroid tolerance in mm.
         radial_tol_mm: Radial profile tolerance in mm.
         face_area_tol_pct: Face area tolerance in percent.
+        hausdorff_tol_mm: Maximum allowed surface deviation in mm.
+        hausdorff_mean_tol_mm: Maximum allowed mean surface deviation in mm.
+        hausdorff_samples: Surface sample points per direction.
 
     Returns:
         The generated test file content as a string.
@@ -99,13 +106,26 @@ def generate_test_file(
     lines.append("")
 
     # ── imports ──────────────────────────────────────────────────────
+    has_mesh = bool(getattr(fp, "surface_mesh", None)
+                    and fp.surface_mesh.get("triangle_count"))
+
     lines.append("import math")
+    if has_mesh:
+        lines.append("import base64")
+        lines.append("import bisect")
+        lines.append("import struct")
+        lines.append("import zlib")
     lines.append("")
     lines.append("import pytest")
     lines.append("")
     lines.append("from build123d import Part")
     lines.append("from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface")
     lines.append("from OCP.BRepAlgoAPI import BRepAlgoAPI_Section")
+    if has_mesh:
+        lines.append("from OCP.BRep import BRep_Tool")
+        lines.append("from OCP.BRepMesh import BRepMesh_IncrementalMesh")
+        lines.append("from OCP.BRepTools import BRepTools")
+        lines.append("from OCP.TopLoc import TopLoc_Location")
     lines.append("from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace")
     lines.append("from OCP.BRepGProp import BRepGProp")
     lines.append("from OCP.GCPnts import GCPnts_AbscissaPoint")
@@ -117,7 +137,8 @@ def generate_test_file(
     lines.append("from OCP.GProp import GProp_GProps")
     lines.append("from OCP.IntCurvesFace import IntCurvesFace_ShapeIntersector")
     lines.append("from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds")
-    lines.append("from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_VERTEX")
+    lines.append("from OCP.TopAbs import "
+                 "TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_VERTEX")
     lines.append("from OCP.TopExp import TopExp_Explorer")
     lines.append("from OCP.TopTools import TopTools_HSequenceOfShape")
     lines.append("from OCP.TopoDS import TopoDS")
@@ -207,6 +228,10 @@ def generate_test_file(
                      f'"radii": {{{radii_str}}}}},')
     lines.append("]")
     lines.append("")
+
+    # Reference surface mesh (for the Hausdorff distance tests)
+    if has_mesh:
+        lines.extend(_reference_mesh_lines(fp.surface_mesh, hausdorff_samples))
     lines.append("")
 
     # ── helpers ───────────────────────────────────────────────────────
@@ -350,6 +375,9 @@ def generate_test_file(
             return math.sqrt(dx * dx + dy * dy + dz * dz)
         return None
     """))
+
+    if has_mesh:
+        lines.extend(_hausdorff_helper_lines())
 
     # ── test classes ─────────────────────────────────────────────────
     lines.append("")
@@ -637,6 +665,21 @@ def generate_test_file(
     lines.append(f"            )")
     lines.append("")
 
+    # -- Hausdorff surface deviation
+    if has_mesh:
+        from .hausdorff import tolerance_floor
+
+        floor = tolerance_floor(fp.surface_mesh)
+        max_tol = max(hausdorff_tol_mm, floor)
+        mean_tol = max(hausdorff_mean_tol_mm, floor / 4.0)
+        lines.extend(_hausdorff_test_lines(
+            fixture_name, max_tol, mean_tol, fp.surface_mesh,
+            raised=(max_tol > hausdorff_tol_mm
+                    or mean_tol > hausdorff_mean_tol_mm),
+            requested_max=hausdorff_tol_mm,
+            requested_mean=hausdorff_mean_tol_mm,
+        ))
+
     # -- Build quality
     bq = fingerprint.build_quality
     if bq:
@@ -707,6 +750,258 @@ def generate_test_file(
         Path(output_path).write_text(content)
 
     return content
+
+
+
+def _wrapped_b64(name: str, payload: str, width: int = 72) -> list[str]:
+    """Emit a long base64 payload as implicitly-concatenated string literals."""
+    if not payload:
+        return [f'    "{name}": "",']
+    chunks = [payload[i:i + width] for i in range(0, len(payload), width)]
+    out = [f'    "{name}": ('] + [f'        "{c}"' for c in chunks] + ["    ),"]
+    return out
+
+
+def _reference_mesh_lines(surface_mesh: dict, samples: int) -> list[str]:
+    """Emit the encoded reference surface mesh as a module-level constant."""
+    if surface_mesh.get("truncated") or not surface_mesh.get("vertices"):
+        # The summarised stdout dump carries counts but no payload. Say so
+        # here rather than emitting a test file that fails inside zlib.
+        raise ValueError(
+            "this fingerprint's surface mesh was truncated for display, so "
+            "no surface-deviation tests can be generated from it; re-run the "
+            "analysis with --json to write the full mesh"
+        )
+    lines = [
+        "# Reference surface mesh — the triangulated reference surface, used by",
+        "# the Hausdorff distance tests. Vertices are 16-bit quantised over the",
+        "# bounding box (sub-micron), zlib-compressed and base64-encoded.",
+        "REF_MESH = {",
+        f'    "encoding": "{surface_mesh["encoding"]}",',
+        f'    "vertex_count": {surface_mesh["vertex_count"]},',
+        f'    "triangle_count": {surface_mesh["triangle_count"]},',
+        f'    "bbox_min": {_fmt_tuple(surface_mesh["bbox_min"], 6)},',
+        f'    "bbox_max": {_fmt_tuple(surface_mesh["bbox_max"], 6)},',
+        f'    "index_bits": {surface_mesh["index_bits"]},',
+        f'    "max_triangles": {max(surface_mesh["triangle_count"] * 4, 20000)},',
+        f'    "deflection": {surface_mesh["deflection"]},',
+        f'    "angular_deflection":'
+        f' {surface_mesh.get("angular_deflection", 0.35)},',
+        f'    "resolution": {surface_mesh.get("resolution", 0.0)},',
+        f'    "candidate_resolution":'
+        f' {surface_mesh.get("candidate_resolution", surface_mesh["deflection"])},',
+    ]
+    lines.extend(_wrapped_b64("vertices", surface_mesh["vertices"]))
+    lines.extend(_wrapped_b64("triangles", surface_mesh["triangles"]))
+    lines.append("}")
+    lines.append("")
+    lines.append(f"HAUSDORFF_SAMPLES = {samples}")
+    lines.append("")
+    return lines
+
+
+def _hausdorff_helper_lines() -> list[str]:
+    """Embed the shared Hausdorff implementation into the generated file.
+
+    The functions are copied verbatim from ``cad_fingerprint.hausdorff`` and
+    ``cad_fingerprint.analyze`` so the generated tests and the ``compare``
+    command run exactly the same algorithm, with no runtime dependency on
+    cad-fingerprint itself.
+    """
+    from . import analyze, hausdorff
+
+    sources = [
+        hausdorff.decode_mesh,
+        hausdorff._point_triangle_distance2,
+        hausdorff._mesh_area,
+        hausdorff.TriangleGrid,
+        hausdorff._radical_inverse,
+        hausdorff.sample_mesh_points,
+        hausdorff._distance_stats,
+        hausdorff.hausdorff_distance,
+        analyze._triangulate,
+    ]
+    lines = [
+        "",
+        "# ═══════════════════════════════════════════════════════════",
+        "# Hausdorff distance helpers",
+        "# (copied verbatim from cad_fingerprint.hausdorff / .analyze)",
+        "# ═══════════════════════════════════════════════════════════",
+        "",
+    ]
+    for obj in sources:
+        lines.extend(inspect.getsource(obj).rstrip("\n").split("\n"))
+        lines.append("")
+        lines.append("")
+
+    lines.extend(textwrap.dedent('''\
+    _HAUSDORFF_CACHE = {}
+
+
+    def _shape_signature(shape):
+        """Cheap key identifying a shape's geometry (not its object identity).
+
+        Volume and envelope alone would collide on exactly the differences
+        this test exists to catch — a mirrored part, or a feature moved
+        within the same envelope — so the centre of mass and surface area
+        go in too.
+        """
+        volume = GProp_GProps()
+        BRepGProp.VolumeProperties_s(shape.wrapped, volume)
+        surface = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(shape.wrapped, surface)
+        com = volume.CentreOfMass()
+        bb = shape.bounding_box()
+        return (
+            round(volume.Mass(), 9), round(surface.Mass(), 9),
+            round(com.X(), 9), round(com.Y(), 9), round(com.Z(), 9),
+            round(bb.min.X, 9), round(bb.min.Y, 9), round(bb.min.Z, 9),
+            round(bb.max.X, 9), round(bb.max.Y, 9), round(bb.max.Z, 9),
+        )
+
+
+    def _hausdorff_vs_reference(shape):
+        """Two-sided surface deviation between `shape` and the reference mesh.
+
+        Keyed on the shape's geometry rather than on `id()`, because a
+        function-scoped pytest fixture hands each test a freshly built part —
+        the max and mean tests would otherwise pay for the whole measurement
+        twice.
+        """
+        key = _shape_signature(shape)
+        if key in _HAUSDORFF_CACHE:
+            return _HAUSDORFF_CACHE[key]
+        reference = decode_mesh(REF_MESH)
+        deflection = REF_MESH["deflection"]
+        angular = REF_MESH["angular_deflection"]
+        actual = _triangulate(shape, deflection, angular, True)
+        # The reference mesh was capped; cap this one too, or a part with far
+        # more detail makes these pure-Python distance queries crawl.
+        attempts = 0
+        while len(actual[1]) > REF_MESH["max_triangles"] and attempts < 6:
+            deflection *= 1.7
+            angular = min(angular * 1.3, 1.0)
+            attempts += 1
+            actual = _triangulate(shape, deflection, angular, True)
+        result = hausdorff_distance(reference, actual, HAUSDORFF_SAMPLES)
+        # Coarsening costs accuracy, so the floor has to move with it. Chord
+        # error scales with the deflection the mesh was built at, which is
+        # all this needs: reading it off the candidate's own facets would let
+        # the part under test widen the tolerance it is judged by.
+        candidate_error = REF_MESH["candidate_resolution"] * (
+            deflection / REF_MESH["deflection"]
+        )
+        result["floor"] = 2.0 * (REF_MESH["resolution"] + candidate_error)
+        result["deflection"] = deflection
+        if len(_HAUSDORFF_CACHE) > 4:
+            _HAUSDORFF_CACHE.clear()
+        _HAUSDORFF_CACHE[key] = result
+        return result
+    ''').split("\n"))
+    return lines
+
+
+def _hausdorff_test_lines(
+    fixture_name: str,
+    max_tol_mm: float,
+    mean_tol_mm: float,
+    surface_mesh: dict,
+    raised: bool = False,
+    requested_max: float = 0.0,
+    requested_mean: float = 0.0,
+) -> list[str]:
+    """Emit the Hausdorff distance test class.
+
+    Args:
+        max_tol_mm / mean_tol_mm: tolerances, already floored to what the
+            reference mesh can actually resolve.
+        surface_mesh: the reference mesh entry, for the explanatory comment.
+        raised: whether mesh resolution forced either tolerance up.
+        requested_max / requested_mean: what was asked for, for the note.
+    """
+    from .hausdorff import mesh_resolution
+
+    if raised:
+        cluster_cell = surface_mesh.get("cluster_cell", 0.0)
+        clustered = (
+            not surface_mesh.get("remeshed", True)
+            and cluster_cell > 0.0
+            and cluster_cell >= surface_mesh.get("facet_error", 0.0)
+        )
+        if clustered:
+            # The reference STL was thinned to fit the triangle budget, so a
+            # finer export would be thinned right back down to the same mesh.
+            advice = ("# Raise --max-mesh-triangles to keep more of the"
+                      " reference mesh.")
+        elif not surface_mesh.get("remeshed", True):
+            advice = ("# Export the STL more finely, or state its tolerance"
+                      " with --stl-facet-error,\n# for a tighter check.")
+        else:
+            advice = ("# Re-run with a smaller --mesh-deflection and a larger"
+                      " --max-mesh-triangles\n# for a finer reference mesh"
+                      " and tighter tolerances.")
+        which = []
+        if max_tol_mm > requested_max:
+            which.append(f"max {requested_max} -> {max_tol_mm} mm")
+        if mean_tol_mm > requested_mean:
+            which.append(f"mean {requested_mean} -> {mean_tol_mm} mm")
+        note = [
+            f"# Surface-deviation tolerance raised: {'; '.join(which)}.",
+            f"# The meshing error is {mesh_resolution(surface_mesh):.4f} mm"
+            f" — this reference mesh plus",
+            f"# the mesh the part under test is measured against. Two"
+            f" triangulations of one",
+            f"# surface differ by about that much, so anything tighter would"
+            f" flag meshing",
+            f"# noise as a defect.",
+        ] + advice.split("\n")
+    else:
+        note = []
+    body = textwrap.dedent(f'''\
+
+    class TestSurfaceDeviation:
+        """Hausdorff distance — worst-case point-to-surface deviation.
+
+        Volume, area and cross-sections are aggregates: they can all agree
+        while the surface is locally wrong. These tests sample points on both
+        surfaces and measure how far each one is from the other surface.
+        """
+
+        def test_max_deviation(self, {fixture_name}):
+            """No sampled point on either surface is further than the tolerance.
+
+            This is a sampled estimate, not a proof: with HAUSDORFF_SAMPLES
+            points per direction against {surface_mesh['triangle_count']}
+            reference triangles, a defect confined to a few triangles can be
+            missed. Raise --hausdorff-samples to sample the surface harder.
+            """
+            result = _hausdorff_vs_reference({fixture_name})
+            tolerance = max({max_tol_mm}, result["floor"])
+            fwd = result["forward"]["max"]
+            bwd = result["backward"]["max"]
+            side = "missing material" if fwd > bwd else "excess material"
+            assert result["hausdorff"] < tolerance, (
+                f"Hausdorff distance {{result['hausdorff']:.4f}}mm exceeds "
+                f"{{tolerance:.4f}}mm over {{result['samples']}} "
+                f"samples/direction (ref→part {{fwd:.4f}}, part→ref "
+                f"{{bwd:.4f}}, 95th pct {{result['p95']:.4f}}) — worst area "
+                f"looks like {{side}}"
+            )
+
+        def test_mean_deviation(self, {fixture_name}):
+            """The surfaces agree closely on average, not just at worst case."""
+            result = _hausdorff_vs_reference({fixture_name})
+            tolerance = max({mean_tol_mm}, result["floor"] / 4.0)
+            assert result["mean"] < tolerance, (
+                f"Mean surface deviation {{result['mean']:.4f}}mm exceeds "
+                f"{{tolerance:.4f}}mm (RMS {{result['rms']:.4f}}, 95th pct "
+                f"{{result['p95']:.4f}}) — the whole surface is off, not just "
+                f"a local feature"
+            )
+    ''').split("\n")
+    if note:
+        body[1:1] = note + [""]
+    return body
 
 
 def generate_prompt(
@@ -827,6 +1122,9 @@ def generate_prompt(
                  f"{axis} positions")
     lines.append("   - `REF_RADIAL_PROFILE` — outer radius at multiple positions × angles")
     lines.append("   - `REF_VOLUME`, `REF_SURFACE_AREA`, `REF_BBOX_*` — global properties")
+    if getattr(fp, "surface_mesh", None) and fp.surface_mesh.get("triangle_count"):
+        lines.append("   - `REF_MESH` — the triangulated reference surface, used by the "
+                     "Hausdorff surface-deviation tests")
     lines.append("   - `REF_INERTIA` — moments of inertia (very sensitive to mass distribution)")
     lines.append("")
     lines.append("2. **Create your implementation** in a new file that exports a "
@@ -859,6 +1157,12 @@ def generate_prompt(
     lines.append("- **Face inventory** lists every surface. BSpline faces are "
                  "sculpted regions — you may need `fillet`, `sweep`, or `loft` "
                  "operations, or accept that OCCT will approximate them as BSplines.")
+    lines.append("- **Surface deviation** (Hausdorff distance) is the catch-all: it "
+                 "samples points on both surfaces and measures the worst-case "
+                 "point-to-surface distance. If aggregate tests pass but this one "
+                 "fails, a local feature is in the wrong place or the wrong shape; "
+                 "the failure message says whether the part has excess or missing "
+                 "material.")
     lines.append("- **Cylinder diameters** give you key feature sizes directly.")
     lines.append("- **Torus faces** are fillets/rounds — the minor radius is the "
                  "fillet radius.")

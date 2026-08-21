@@ -31,7 +31,7 @@ from OCP.GeomAbs import (
 )
 from OCP.GProp import GProp_GProps
 from OCP.gp import gp_Dir, gp_Lin, gp_Pln, gp_Pnt, gp_Vec
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX
+from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_REVERSED, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopTools import TopTools_HSequenceOfShape
 from OCP.TopoDS import TopoDS
@@ -576,6 +576,309 @@ def radial_profile_mesh(
     return profiles
 
 
+# ── surface mesh (for Hausdorff distance) ────────────────────────────
+
+
+DEFAULT_MAX_TRIANGLES = 12000
+
+
+DEFAULT_ANGULAR_DEFLECTION = 0.35
+
+
+def mesh_shape(
+    shape,
+    deflection: float | None = None,
+    angular_deflection: float | None = None,
+    max_triangles: int = DEFAULT_MAX_TRIANGLES,
+    remesh: bool = True,
+    facet_error: float | None = None,
+) -> dict:
+    """Triangulate a shape and return its mesh as an encoded fingerprint entry.
+
+    The mesh is what makes a Hausdorff distance possible: every other
+    fingerprint metric is an aggregate, but a point-to-surface distance needs
+    the reference surface itself. Meshes are stored compressed (see
+    :mod:`cad_fingerprint.hausdorff`) so they stay small in JSON and in
+    generated test files.
+
+    Args:
+        shape: build123d Part (STEP) or Face (STL, already triangulated).
+        deflection: linear deflection in mm; ``None`` picks one from the
+            bounding-box diagonal. For STL it cannot re-mesh the facets, so
+            it is used as the vertex-clustering cell instead (and as the
+            deflection the part under test is meshed with).
+        angular_deflection: angular deflection in radians; ``None`` scales it
+            with ``deflection``, since on blends and small fillets the angular
+            limit — not the linear one — is what bounds the chord error.
+        max_triangles: budget. STEP meshes are retried coarser until they
+            fit; STL meshes are vertex-clustered. Raising it buys a finer
+            reference mesh, hence tighter tolerances, at the cost of a bigger
+            generated test file.
+        remesh: run BRepMesh_IncrementalMesh (False for STL, which arrives
+            already triangulated and has no analytical surface to re-mesh).
+        facet_error: for STL, the export tolerance the facets were written
+            at. ``None`` estimates it from the facets, which cannot be done
+            for a mesh coarse enough to be a faceted part in its own right.
+
+    Returns the encoded mesh plus:
+        ``deflection`` / ``angular_deflection`` — what the part under test
+            should be meshed with,
+        ``resolution`` — how far this mesh may sit from the true surface,
+        ``candidate_resolution`` — the same, for the part under test,
+        ``remeshed`` / ``cluster_cell`` — how the budget was met.
+    """
+    from .hausdorff import (
+        cluster_decimate, encode_mesh, estimate_facet_resolution,
+    )
+
+    bb = shape.bounding_box()
+    diag = math.sqrt(
+        (bb.max.X - bb.min.X) ** 2
+        + (bb.max.Y - bb.min.Y) ** 2
+        + (bb.max.Z - bb.min.Z) ** 2
+    )
+    requested = deflection
+    auto = min(max(diag / 1000.0, 0.005), 0.2)
+    if deflection is None:
+        deflection = auto
+    if angular_deflection is None:
+        # Asking for a finer surface has to tighten both limits, or the
+        # angular one silently caps how fine the mesh can get.
+        angular_deflection = min(
+            max(DEFAULT_ANGULAR_DEFLECTION * min(1.0, deflection / auto), 0.05),
+            0.5,
+        )
+
+    vertices, triangles = _triangulate(shape, deflection, angular_deflection, remesh)
+
+    cluster_cell = 0.0
+    if remesh:
+        # Analytical surfaces can simply be re-meshed coarser.
+        attempts = 0
+        while len(triangles) > max_triangles and attempts < 6:
+            deflection *= 1.7
+            angular_deflection = min(angular_deflection * 1.3, 1.0)
+            attempts += 1
+            vertices, triangles = _triangulate(
+                shape, deflection, angular_deflection, remesh
+            )
+        # With the real surface in hand there is nothing to estimate: mesh
+        # it far more finely and measure how far the stored mesh sits from
+        # that. Exact for flat faces (zero), for chamfers, and for meshes so
+        # coarse that facet angles stop looking like a smooth surface.
+        resolution = _measured_resolution(
+            shape, vertices, triangles, deflection, angular_deflection
+        )
+        candidate_resolution = resolution  # meshed the same way, same error
+    else:
+        # STL facets cannot be re-meshed, so read their chord error before
+        # touching anything: clustering snaps vertices onto a lattice, which
+        # turns the gentle folds the estimate reads into sharp ones.
+        facets = (
+            facet_error if facet_error is not None
+            else estimate_facet_resolution(vertices, triangles)
+        )
+        vertices, triangles, cluster_cell = _cluster_to_budget(
+            vertices, triangles, bb, requested, max_triangles
+        )
+        # Two independent errors, so they add: how far the facets sat from
+        # the exported surface, plus how far clustering moved them.
+        resolution = facets + cluster_cell
+        # The part under test is meshed by OCCT at `deflection`, which bounds
+        # its own chord error.
+        candidate_resolution = deflection
+
+    data = encode_mesh(vertices, triangles)
+    data["deflection"] = round(deflection, 6)
+    data["angular_deflection"] = round(angular_deflection, 6)
+    data["resolution"] = round(resolution, 6)
+    data["candidate_resolution"] = round(candidate_resolution, 6)
+    data["remeshed"] = remesh
+    data["cluster_cell"] = round(cluster_cell, 6)
+    data["facet_error"] = round(0.0 if remesh else facets, 6)
+    data["facet_error_declared"] = facet_error is not None
+    data["diagonal"] = round(diag, 4)
+    return data
+
+
+def _cluster_to_budget(vertices, triangles, bb, requested, max_triangles):
+    """Cluster an STL mesh down towards the triangle budget.
+
+    Returns (vertices, triangles, cell). Clustering at a cell wider than a
+    wall is thick snaps that wall's two surfaces onto each other, and the
+    reference stops describing the part. A bounding-box ceiling only catches
+    that when the thin feature *is* the whole part, so every candidate cell
+    is checked against the mesh's enclosed volume, which a collapsed wall
+    changes drastically. An over-budget mesh beats a wrong one.
+    """
+    from .hausdorff import cluster_decimate
+
+    thinnest = min(
+        bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z
+    )
+    max_cell = thinnest / 3.0 if thinnest > 0 else float("inf")
+
+    cell = requested or 0.0
+    if not cell and len(triangles) > max_triangles:
+        # One cluster per cell, so aim the cell at the edge length a mesh of
+        # max_triangles covering this surface would have.
+        cell = math.sqrt(2.0 * _mesh_area(vertices, triangles) / max_triangles)
+    if not cell:
+        return vertices, triangles, 0.0
+    cell = min(cell, max_cell)
+
+    reference_volume = abs(_signed_volume(vertices, triangles))
+
+    def distorts(mesh):
+        if reference_volume < 1e-9:
+            return False  # open or flat mesh — no volume to preserve
+        changed = abs(_signed_volume(*mesh))
+        return abs(changed - reference_volume) / reference_volume > 0.05
+
+    clustered = cluster_decimate(vertices, triangles, cell)
+    # Back off until the part survives the clustering.
+    attempts = 0
+    while distorts(clustered) and attempts < 8:
+        cell /= 1.6
+        attempts += 1
+        clustered = cluster_decimate(vertices, triangles, cell)
+    if distorts(clustered):
+        return vertices, triangles, 0.0  # cannot thin this part safely
+
+    # Then coarsen towards the budget for as long as it stays intact.
+    attempts = 0
+    while (len(clustered[1]) > max_triangles and attempts < 8
+           and cell * 1.4 <= max_cell):
+        wider = cluster_decimate(vertices, triangles, cell * 1.4)
+        if distorts(wider):
+            break
+        cell *= 1.4
+        attempts += 1
+        clustered = wider
+    return clustered[0], clustered[1], cell
+
+
+def _signed_volume(vertices, triangles) -> float:
+    """Volume enclosed by a triangle mesh, via the divergence theorem."""
+    total = 0.0
+    for i, j, k in triangles:
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        total += (
+            a[0] * (b[1] * c[2] - b[2] * c[1])
+            - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
+        )
+    return total / 6.0
+
+
+def _measured_resolution(
+    shape, vertices, triangles, deflection, angular_deflection,
+    max_probes: int = 20000,
+) -> float:
+    """How far a triangulation sits from the surface it approximates, in mm.
+
+    Measured, not estimated: the shape is re-meshed several times finer and
+    the stored mesh is measured against it. Probes are facet centroids —
+    a chord's deviation peaks in the middle of a facet, not at its edges, so
+    scattered sampling reads low — one per triangle up to ``max_probes``.
+    """
+    from .hausdorff import TriangleGrid
+
+    if not triangles:
+        return 0.0
+    fine = _triangulate(
+        shape,
+        max(deflection / 5.0, 1e-4),
+        max(angular_deflection / 3.0, 0.02),
+        True,
+    )
+    if not fine[1]:
+        return 0.0
+    grid = TriangleGrid(*fine)
+    stride = max(len(triangles) // max_probes, 1)
+    worst = 0.0
+    for n in range(0, len(triangles), stride):
+        i, j, k = triangles[n]
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        centroid = (
+            (a[0] + b[0] + c[0]) / 3.0,
+            (a[1] + b[1] + c[1]) / 3.0,
+            (a[2] + b[2] + c[2]) / 3.0,
+        )
+        worst = max(worst, grid.nearest_distance(centroid))
+    return worst
+
+
+def _mesh_area(vertices, triangles) -> float:
+    """Total surface area of a triangle mesh."""
+    total = 0.0
+    for i, j, k in triangles:
+        a, b, c = vertices[i], vertices[j], vertices[k]
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        total += 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+    return total
+
+
+def _triangulate(shape, deflection, angular_deflection, remesh):
+    """Return (vertices, triangles) for a shape, meshing it first if asked.
+
+    Meshing writes a triangulation into the shape, so a copy is meshed and
+    the caller's shape is left exactly as it was — generated tests must not
+    mutate the fixture they are handed.
+    """
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.BRepTools import BRepTools
+    from OCP.TopLoc import TopLoc_Location
+
+    target = shape.wrapped
+    if remesh:
+        target = BRepBuilderAPI_Copy(target).Shape()
+        BRepTools.Clean_s(target)
+        BRepMesh_IncrementalMesh(
+            target, deflection, False, angular_deflection, True
+        )
+
+    vertices: list = []
+    triangles: list = []
+    explorer = TopExp_Explorer(target, TopAbs_FACE)
+    while explorer.More():
+        face = TopoDS.Face_s(explorer.Current())
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            explorer.Next()
+            continue
+        transform = loc.Transformation()
+        flipped = face.Orientation() == TopAbs_REVERSED
+        offset = len(vertices)
+        for i in range(1, tri.NbNodes() + 1):
+            pnt = tri.Node(i).Transformed(transform)
+            vertices.append((pnt.X(), pnt.Y(), pnt.Z()))
+        for i in range(1, tri.NbTriangles() + 1):
+            n1, n2, n3 = tri.Triangle(i).Get()
+            if flipped:
+                n2, n3 = n3, n2
+            triangles.append((offset + n1 - 1, offset + n2 - 1, offset + n3 - 1))
+        explorer.Next()
+    return vertices, triangles
+
+
+def decoded_mesh(surface_mesh: dict) -> tuple[list, list]:
+    """Decode a fingerprint's ``surface_mesh`` entry into (vertices, triangles)."""
+    from .hausdorff import decode_mesh
+
+    if not surface_mesh or not surface_mesh.get("triangle_count"):
+        return [], []
+    return decode_mesh(surface_mesh)
+
+
+
 # ── build quality ────────────────────────────────────────────────────
 
 
@@ -1024,6 +1327,10 @@ def analyze_stl(
     num_cross_sections: int = 20,
     num_radial_slices: int = 15,
     num_angles: int = 12,
+    capture_mesh: bool = True,
+    mesh_deflection: float | None = None,
+    max_mesh_triangles: int = DEFAULT_MAX_TRIANGLES,
+    stl_facet_error: float | None = None,
 ) -> dict:
     """Run full geometric analysis on an STL file.
 
@@ -1050,6 +1357,12 @@ def analyze_stl(
     faces = [{"type": "mesh", "triangle_count": tri.NbTriangles() if tri else 0,
               "area": round(va["surface_area"], 4)}]
 
+    mesh = (
+        mesh_shape(stl_face, deflection=mesh_deflection, remesh=False,
+                   max_triangles=max_mesh_triangles,
+                   facet_error=stl_facet_error)
+        if capture_mesh else {}
+    )
     xs = cross_section_areas_mesh(stl_face, axis=axis, num_slices=num_cross_sections)
     rp = radial_profile_mesh(stl_face, axis=axis, num_slices=num_radial_slices, num_angles=num_angles)
     bq = build_quality_stl(stl_face, stl_path=path)
@@ -1065,6 +1378,7 @@ def analyze_stl(
         "face_inventory": faces,
         "cross_sections": xs,
         "radial_profile": rp,
+        "surface_mesh": mesh,
         "build_quality": bq,
         "description": desc,
     }
@@ -1079,6 +1393,10 @@ def analyze_step(
     num_cross_sections: int = 20,
     num_radial_slices: int = 15,
     num_angles: int = 12,
+    capture_mesh: bool = True,
+    mesh_deflection: float | None = None,
+    mesh_angular_deflection: float | None = None,
+    max_mesh_triangles: int = DEFAULT_MAX_TRIANGLES,
 ) -> dict:
     """Run full geometric analysis on a STEP file.
 
@@ -1093,6 +1411,12 @@ def analyze_step(
     faces = face_inventory(shape)
     edges = edge_inventory(shape)
     xs = cross_section_areas(shape, axis=axis, num_slices=num_cross_sections)
+    mesh = (
+        mesh_shape(shape, deflection=mesh_deflection,
+                   angular_deflection=mesh_angular_deflection,
+                   max_triangles=max_mesh_triangles)
+        if capture_mesh else {}
+    )
 
     result = {
         "file": str(path),
@@ -1104,6 +1428,7 @@ def analyze_step(
         "face_inventory": faces,
         "edge_inventory": edges,
         "cross_sections": xs,
+        "surface_mesh": mesh,
         "radial_profile": radial_profile(
             shape, axis=axis, num_slices=num_radial_slices,
             num_angles=num_angles,
