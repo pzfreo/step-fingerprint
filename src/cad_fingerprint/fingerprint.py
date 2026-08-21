@@ -27,6 +27,7 @@ class CadFingerprint:
     cross_sections: list[dict]
     radial_profile: list[dict]
     edge_inventory: list[dict] = field(default_factory=list)
+    surface_mesh: dict = field(default_factory=dict)
     build_quality: dict = field(default_factory=dict)
     description: dict = field(default_factory=dict)
     source_format: str = "step"
@@ -39,6 +40,8 @@ class CadFingerprint:
         num_cross_sections: int = 20,
         num_radial_slices: int = 15,
         num_angles: int = 12,
+        capture_mesh: bool = True,
+        mesh_deflection: Optional[float] = None,
     ) -> "CadFingerprint":
         """Analyze an STL file and return its fingerprint.
 
@@ -52,6 +55,8 @@ class CadFingerprint:
             num_cross_sections=num_cross_sections,
             num_radial_slices=num_radial_slices,
             num_angles=num_angles,
+            capture_mesh=capture_mesh,
+            mesh_deflection=mesh_deflection,
         )
         return cls(**data)
 
@@ -63,6 +68,8 @@ class CadFingerprint:
         num_cross_sections: int = 20,
         num_radial_slices: int = 15,
         num_angles: int = 12,
+        capture_mesh: bool = True,
+        mesh_deflection: Optional[float] = None,
     ) -> "CadFingerprint":
         """Analyze a STEP file and return its fingerprint."""
         data = analyze.analyze_step(
@@ -71,6 +78,8 @@ class CadFingerprint:
             num_cross_sections=num_cross_sections,
             num_radial_slices=num_radial_slices,
             num_angles=num_angles,
+            capture_mesh=capture_mesh,
+            mesh_deflection=mesh_deflection,
         )
         return cls(**data)
 

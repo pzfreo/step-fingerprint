@@ -31,7 +31,7 @@ from OCP.GeomAbs import (
 )
 from OCP.GProp import GProp_GProps
 from OCP.gp import gp_Dir, gp_Lin, gp_Pln, gp_Pnt, gp_Vec
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX
+from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_REVERSED, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopTools import TopTools_HSequenceOfShape
 from OCP.TopoDS import TopoDS
@@ -576,6 +576,112 @@ def radial_profile_mesh(
     return profiles
 
 
+# ── surface mesh (for Hausdorff distance) ────────────────────────────
+
+
+DEFAULT_MAX_TRIANGLES = 12000
+
+
+def mesh_shape(
+    shape,
+    deflection: float | None = None,
+    angular_deflection: float = 0.35,
+    max_triangles: int = DEFAULT_MAX_TRIANGLES,
+    remesh: bool = True,
+) -> dict:
+    """Triangulate a shape and return its mesh as an encoded fingerprint entry.
+
+    The mesh is what makes a Hausdorff distance possible: every other
+    fingerprint metric is an aggregate, but a point-to-surface distance needs
+    the reference surface itself. Meshes are stored compressed (see
+    :mod:`cad_fingerprint.hausdorff`) so they stay small in JSON and in
+    generated test files.
+
+    Args:
+        shape: build123d Part (STEP) or Face (STL, already triangulated).
+        deflection: linear deflection in mm; ``None`` picks one from the
+            bounding-box diagonal.
+        angular_deflection: angular deflection in radians.
+        max_triangles: budget — meshing is retried coarser until the mesh fits.
+        remesh: run BRepMesh_IncrementalMesh (False for STL, which arrives
+            already triangulated and has no analytical surface to re-mesh).
+
+    Returns a dict with the encoded mesh plus the deflection actually used.
+    """
+    from .hausdorff import encode_mesh
+
+    bb = shape.bounding_box()
+    diag = math.sqrt(
+        (bb.max.X - bb.min.X) ** 2
+        + (bb.max.Y - bb.min.Y) ** 2
+        + (bb.max.Z - bb.min.Z) ** 2
+    )
+    if deflection is None:
+        deflection = min(max(diag / 1000.0, 0.005), 0.2)
+
+    vertices, triangles = _triangulate(shape, deflection, angular_deflection, remesh)
+    attempts = 0
+    while remesh and len(triangles) > max_triangles and attempts < 5:
+        deflection *= 1.7
+        attempts += 1
+        vertices, triangles = _triangulate(
+            shape, deflection, angular_deflection, remesh
+        )
+
+    data = encode_mesh(vertices, triangles)
+    data["deflection"] = round(deflection, 6)
+    data["diagonal"] = round(diag, 4)
+    return data
+
+
+def _triangulate(shape, deflection, angular_deflection, remesh):
+    """Return (vertices, triangles) for a shape, meshing it first if asked."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.BRepTools import BRepTools
+    from OCP.TopLoc import TopLoc_Location
+
+    if remesh:
+        BRepTools.Clean_s(shape.wrapped)
+        BRepMesh_IncrementalMesh(
+            shape.wrapped, deflection, False, angular_deflection, True
+        )
+
+    vertices: list = []
+    triangles: list = []
+    explorer = TopExp_Explorer(shape.wrapped, TopAbs_FACE)
+    while explorer.More():
+        face = TopoDS.Face_s(explorer.Current())
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation_s(face, loc)
+        if tri is None:
+            explorer.Next()
+            continue
+        transform = loc.Transformation()
+        flipped = face.Orientation() == TopAbs_REVERSED
+        offset = len(vertices)
+        for i in range(1, tri.NbNodes() + 1):
+            pnt = tri.Node(i).Transformed(transform)
+            vertices.append((pnt.X(), pnt.Y(), pnt.Z()))
+        for i in range(1, tri.NbTriangles() + 1):
+            n1, n2, n3 = tri.Triangle(i).Get()
+            if flipped:
+                n2, n3 = n3, n2
+            triangles.append((offset + n1 - 1, offset + n2 - 1, offset + n3 - 1))
+        explorer.Next()
+    return vertices, triangles
+
+
+def decoded_mesh(surface_mesh: dict) -> tuple[list, list]:
+    """Decode a fingerprint's ``surface_mesh`` entry into (vertices, triangles)."""
+    from .hausdorff import decode_mesh
+
+    if not surface_mesh:
+        return [], []
+    return decode_mesh(surface_mesh)
+
+
+
 # ── build quality ────────────────────────────────────────────────────
 
 
@@ -1024,6 +1130,8 @@ def analyze_stl(
     num_cross_sections: int = 20,
     num_radial_slices: int = 15,
     num_angles: int = 12,
+    capture_mesh: bool = True,
+    mesh_deflection: float | None = None,
 ) -> dict:
     """Run full geometric analysis on an STL file.
 
@@ -1050,6 +1158,10 @@ def analyze_stl(
     faces = [{"type": "mesh", "triangle_count": tri.NbTriangles() if tri else 0,
               "area": round(va["surface_area"], 4)}]
 
+    mesh = (
+        mesh_shape(stl_face, deflection=mesh_deflection, remesh=False)
+        if capture_mesh else {}
+    )
     xs = cross_section_areas_mesh(stl_face, axis=axis, num_slices=num_cross_sections)
     rp = radial_profile_mesh(stl_face, axis=axis, num_slices=num_radial_slices, num_angles=num_angles)
     bq = build_quality_stl(stl_face, stl_path=path)
@@ -1065,6 +1177,7 @@ def analyze_stl(
         "face_inventory": faces,
         "cross_sections": xs,
         "radial_profile": rp,
+        "surface_mesh": mesh,
         "build_quality": bq,
         "description": desc,
     }
@@ -1079,6 +1192,8 @@ def analyze_step(
     num_cross_sections: int = 20,
     num_radial_slices: int = 15,
     num_angles: int = 12,
+    capture_mesh: bool = True,
+    mesh_deflection: float | None = None,
 ) -> dict:
     """Run full geometric analysis on a STEP file.
 
@@ -1093,6 +1208,7 @@ def analyze_step(
     faces = face_inventory(shape)
     edges = edge_inventory(shape)
     xs = cross_section_areas(shape, axis=axis, num_slices=num_cross_sections)
+    mesh = mesh_shape(shape, deflection=mesh_deflection) if capture_mesh else {}
 
     result = {
         "file": str(path),
@@ -1104,6 +1220,7 @@ def analyze_step(
         "face_inventory": faces,
         "edge_inventory": edges,
         "cross_sections": xs,
+        "surface_mesh": mesh,
         "radial_profile": radial_profile(
             shape, axis=axis, num_slices=num_radial_slices,
             num_angles=num_angles,

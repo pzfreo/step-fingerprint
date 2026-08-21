@@ -30,6 +30,10 @@ def _add_tolerance_args(parser):
                         help="Cross-section 2D moment tolerance %% (default: 5.0)")
     parser.add_argument("--radial-tol", type=float, default=0.15,
                         help="Radial profile tolerance mm (default: 0.15)")
+    parser.add_argument("--hausdorff-tol", type=float, default=0.3,
+                        help="Max surface deviation mm (default: 0.3)")
+    parser.add_argument("--hausdorff-mean-tol", type=float, default=0.05,
+                        help="Mean surface deviation mm (default: 0.05)")
 
 
 def _add_analysis_args(parser):
@@ -49,6 +53,20 @@ def _add_analysis_args(parser):
     parser.add_argument(
         "--angles", type=int, default=12,
         help="Number of angular samples per radial slice (default: 12)",
+    )
+    parser.add_argument(
+        "--hausdorff-samples", type=int, default=2000,
+        help="Surface sample points per direction for the Hausdorff "
+             "distance (default: 2000)",
+    )
+    parser.add_argument(
+        "--mesh-deflection", type=float, default=None,
+        help="Triangulation deflection mm for the reference surface mesh "
+             "(default: bounding-box diagonal / 1000)",
+    )
+    parser.add_argument(
+        "--no-hausdorff", action="store_true",
+        help="Skip the surface mesh and Hausdorff distance measurements",
     )
 
 
@@ -78,6 +96,8 @@ def _run_analyze(args):
             num_cross_sections=args.cross_sections,
             num_radial_slices=args.radial_slices,
             num_angles=args.angles,
+            capture_mesh=not args.no_hausdorff,
+            mesh_deflection=args.mesh_deflection,
         )
         print("  (STL mode: face inventory shows mesh stats only, no surface type classification)")
     else:
@@ -87,6 +107,8 @@ def _run_analyze(args):
             num_cross_sections=args.cross_sections,
             num_radial_slices=args.radial_slices,
             num_angles=args.angles,
+            capture_mesh=not args.no_hausdorff,
+            mesh_deflection=args.mesh_deflection,
         )
 
     va = fp.volume_and_area
@@ -95,6 +117,16 @@ def _run_analyze(args):
     print(f"  Surface area: {va['surface_area']:.2f} mm²")
     print(f"  Bounding box: {bb['size'][0]:.2f} × {bb['size'][1]:.2f} × {bb['size'][2]:.2f} mm")
     print(f"  Faces: {fp.topology['faces']}, Edges: {fp.topology['edges']}")
+    if fp.surface_mesh:
+        mesh_kb = (len(fp.surface_mesh["vertices"])
+                   + len(fp.surface_mesh["triangles"])) // 1024
+        print(f"  Surface mesh: {fp.surface_mesh['triangle_count']} triangles "
+              f"at {fp.surface_mesh['deflection']:.4f} mm deflection ({mesh_kb} KB embedded)")
+        if mesh_kb > 250:
+            hint = ("re-export the STL more coarsely" if is_stl
+                    else "raise --mesh-deflection")
+            print(f"  Note: that mesh is large for an embedded test file — "
+                  f"{hint}, or pass --no-hausdorff to skip it.")
 
     if args.json:
         fp.to_json(args.json)
@@ -116,6 +148,9 @@ def _run_analyze(args):
             cross_section_centroid_tol_mm=args.xs_centroid_tol,
             cross_section_moment_tol_pct=args.xs_moment_tol,
             radial_tol_mm=args.radial_tol,
+            hausdorff_tol_mm=args.hausdorff_tol,
+            hausdorff_mean_tol_mm=args.hausdorff_mean_tol,
+            hausdorff_samples=args.hausdorff_samples,
         )
         print(f"  Test file generated: {args.output}")
 
@@ -153,6 +188,8 @@ def _run_compare(args):
         num_cross_sections=args.cross_sections,
         num_radial_slices=args.radial_slices,
         num_angles=args.angles,
+        capture_mesh=not args.no_hausdorff,
+        mesh_deflection=args.mesh_deflection,
     )
 
     print(f"Analyzing implementation: {impl_path}...")
@@ -162,6 +199,12 @@ def _run_compare(args):
         num_cross_sections=args.cross_sections,
         num_radial_slices=args.radial_slices,
         num_angles=args.angles,
+        capture_mesh=not args.no_hausdorff,
+        mesh_deflection=(
+            args.mesh_deflection
+            if args.mesh_deflection is not None
+            else ref_fp.surface_mesh.get("deflection")
+        ),
     )
 
     print()
@@ -174,6 +217,8 @@ def _run_compare(args):
         cross_section_area_tol_pct=args.xs_area_tol,
         cross_section_centroid_tol_mm=args.xs_centroid_tol,
         radial_tol_mm=args.radial_tol,
+        hausdorff_tol_mm=args.hausdorff_tol,
+        hausdorff_samples=args.hausdorff_samples,
     )
     print(format_comparison(result))
 

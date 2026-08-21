@@ -37,7 +37,28 @@ without needing to compare B-rep trees or CAD history.
 | Edge inventory | Edge types (Line, Circle, BSpline …), counts, and key dimensions |
 | Cross-sections | Area at N evenly-spaced planes along the primary axis |
 | Radial profile | Outer radius at M axial positions × K angles |
+| Surface deviation | Hausdorff distance — worst-case point-to-surface error, both directions |
 | Build quality | Wall thickness, sharp edges, free edges, non-manifold geometry |
+
+The first measurements are all *aggregates*: volume, area, inertia and
+section areas can agree while the surface is locally wrong — a fillet in
+the wrong place, a boss shifted 1 mm, a chamfer that became a round. The
+Hausdorff distance is the complementary check. Both surfaces are triangulated
+and sampled, and the distance from every sample point to the other surface is
+measured in both directions:
+
+```
+forward   = max over points on the reference of distance(point, part surface)
+backward  = max over points on the part of distance(point, reference surface)
+hausdorff = max(forward, backward)
+```
+
+The generated test file embeds the reference triangle mesh (16-bit quantised,
+zlib-compressed, base64-encoded — around 30–60 KB) so the tests stay
+self-contained. Two assertions are generated: worst-case deviation
+(`--hausdorff-tol`, default 0.3 mm) and mean deviation
+(`--hausdorff-mean-tol`, default 0.05 mm). Pass `--no-hausdorff` to skip the
+mesh capture and both tests.
 
 For STL files, face type classification is unavailable (no analytical surface
 information exists in the mesh); all other measurements work normally. The
@@ -84,10 +105,14 @@ Options:
 | `--cross-sections` | 20 | Number of cross-section slices |
 | `--radial-slices` | 15 | Number of axial positions for radial profile |
 | `--angles` | 12 | Angular samples per radial position |
+| `--hausdorff-samples` | 2000 | Surface sample points per direction |
+| `--mesh-deflection` | diagonal/1000 | Triangulation deflection for the reference mesh |
+| `--no-hausdorff` | — | Skip the surface mesh and Hausdorff tests |
 
 Tolerance flags (all have sensible defaults):
 `--volume-tol`, `--area-tol`, `--bbox-tol`, `--inertia-tol`,
-`--xs-area-tol`, `--xs-centroid-tol`, `--xs-moment-tol`, `--radial-tol`
+`--xs-area-tol`, `--xs-centroid-tol`, `--xs-moment-tol`, `--radial-tol`,
+`--hausdorff-tol`, `--hausdorff-mean-tol`
 
 ### Run the generated tests
 
@@ -132,6 +157,14 @@ fp2 = CadFingerprint.from_json("fingerprint.json")  # load
 from cad_fingerprint.compare import compare_fingerprints, format_comparison
 result = compare_fingerprints(fp, fp2)
 print(format_comparison(result))
+print(result["hausdorff"])   # max / forward / backward / mean / rms / p95
+
+# Or measure surface deviation on its own:
+from cad_fingerprint.analyze import decoded_mesh
+from cad_fingerprint.hausdorff import hausdorff_distance
+h = hausdorff_distance(decoded_mesh(fp.surface_mesh),
+                       decoded_mesh(fp2.surface_mesh))
+print(f"{h['hausdorff']:.4f} mm worst case, {h['mean']:.4f} mm mean")
 ```
 
 ## Approach
@@ -155,6 +188,11 @@ OCP bindings) directly:
   intersection radius at each angle. For STL: uses Möller-Trumbore
   ray-triangle intersection from the bounding-box centre to handle parts not
   aligned with the world origin.
+- **Surface deviation** — triangulates the shape with `BRepMesh_IncrementalMesh`
+  (STL meshes are used as supplied), samples points over the surface
+  area-weighted with a deterministic low-discrepancy sequence, and measures
+  point-to-triangle distances through a uniform spatial grid. No RNG is
+  involved, so the same input always yields the same numbers.
 - **Build quality** — `ShapeAnalysis_FreeBounds` for free/non-manifold edges;
   `BRepCheck_Analyzer` for invalid geometry; minimum wall thickness via
   ray-sampling.

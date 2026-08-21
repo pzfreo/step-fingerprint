@@ -31,6 +31,7 @@ Significant cross-section area changes along the Z axis:
    - `REF_CROSS_SECTIONS` — cross-sectional area at multiple Z positions
    - `REF_RADIAL_PROFILE` — outer radius at multiple positions × angles
    - `REF_VOLUME`, `REF_SURFACE_AREA`, `REF_BBOX_*` — global properties
+   - `REF_MESH` — the triangulated reference surface, used by the Hausdorff surface-deviation tests
    - `REF_INERTIA` — moments of inertia (very sensitive to mass distribution)
 
 2. **Create your implementation** in a new file that exports a function returning a build123d `Part`.
@@ -54,6 +55,7 @@ Significant cross-section area changes along the Z axis:
 - **Cross-sections** show area vs position. Large jumps indicate transitions between features. Constant areas indicate cylindrical or prismatic sections.
 - **Radial profiles** show radius vs angle at each position. Uniform radius = circular. Varying radius = sculpted/oval. `None` values mean the ray missed (bore or concavity).
 - **Face inventory** lists every surface. BSpline faces are sculpted regions — you may need `fillet`, `sweep`, or `loft` operations, or accept that OCCT will approximate them as BSplines.
+- **Surface deviation** (Hausdorff distance) is the catch-all: it samples points on both surfaces and measures the worst-case point-to-surface distance. If aggregate tests pass but this one fails, a local feature is in the wrong place or the wrong shape; the failure message says whether the part has excess or missing material.
 - **Cylinder diameters** give you key feature sizes directly.
 - **Torus faces** are fillets/rounds — the minor radius is the fillet radius.
 

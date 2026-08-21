@@ -46,6 +46,8 @@ def compare_fingerprints(
     cross_section_area_tol_pct: float = 3.0,
     cross_section_centroid_tol_mm: float = 0.2,
     radial_tol_mm: float = 0.15,
+    hausdorff_tol_mm: float = 0.3,
+    hausdorff_samples: int = 2000,
 ) -> dict:
     """Compare two fingerprints and return structured results.
 
@@ -151,6 +153,29 @@ def compare_fingerprints(
         })
     results["radial_profile"] = rp_results
 
+    # Hausdorff distance — needs the surface mesh from both fingerprints.
+    if ref.surface_mesh and actual.surface_mesh:
+        from .analyze import decoded_mesh
+        from .hausdorff import hausdorff_distance
+
+        h = hausdorff_distance(
+            decoded_mesh(ref.surface_mesh),
+            decoded_mesh(actual.surface_mesh),
+            samples=hausdorff_samples,
+        )
+        s, _ = _status(h["hausdorff"], 0.0, hausdorff_tol_mm, is_absolute=True)
+        results["hausdorff"] = {
+            "max": h["hausdorff"],
+            "forward": h["forward"]["max"],
+            "backward": h["backward"]["max"],
+            "mean": h["mean"],
+            "rms": h["rms"],
+            "p95": h["p95"],
+            "samples": h["samples"],
+            "tolerance": hausdorff_tol_mm,
+            "status": s,
+        }
+
     # Summary
     all_statuses = []
     all_statuses.append(results["volume"]["status"])
@@ -160,6 +185,8 @@ def compare_fingerprints(
     all_statuses.extend(f["status"] for f in results["face_inventory"].values())
     all_statuses.extend(x["status"] for x in results["cross_sections"])
     all_statuses.extend(r["status"] for r in results["radial_profile"])
+    if "hausdorff" in results:
+        all_statuses.append(results["hausdorff"]["status"])
 
     results["summary"] = {
         "pass": all_statuses.count("pass"),
@@ -244,6 +271,16 @@ def format_comparison(result: dict) -> str:
                 sym = _colored(r["status"], _STATUS_SYMBOLS[r["status"]])
                 fail_angles = [a for a, d in r["angles"].items() if d["status"] != "pass"]
                 lines.append(f"  {sym} pos={r['position']}: {len(fail_angles)} angle(s) off")
+
+    # Hausdorff distance
+    if "hausdorff" in result:
+        h = result["hausdorff"]
+        sym = _colored(h["status"], _STATUS_SYMBOLS[h["status"]])
+        lines.append(f"{_BOLD}Surface Deviation (Hausdorff){_RESET}")
+        lines.append(f"  {sym} max {h['max']:.4f} mm "
+                     f"(tolerance {h['tolerance']} mm, {h['samples']} samples/direction)")
+        lines.append(f"    ref→impl {h['forward']:.4f}, impl→ref {h['backward']:.4f}, "
+                     f"mean {h['mean']:.4f}, 95th pct {h['p95']:.4f}")
 
     # Summary
     lines.append("")
