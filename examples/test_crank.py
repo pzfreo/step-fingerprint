@@ -675,6 +675,11 @@ def _radial_distance(shape, origin, direction, max_r=20.0):
 
 def decode_mesh(payload: dict) -> tuple[list, list]:
     """Decode an :func:`encode_mesh` payload back into (vertices, triangles)."""
+    if payload and payload.get("truncated"):
+        raise ValueError(
+            "this fingerprint's surface mesh was truncated for display; "
+            "re-run the analysis with --json to write the full mesh"
+        )
     if not payload or not payload.get("vertex_count"):
         return [], []
     lo = payload["bbox_min"]

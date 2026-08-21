@@ -166,10 +166,14 @@ def compare_fingerprints(
             decoded_mesh(actual.surface_mesh),
             samples=hausdorff_samples,
         )
-        # Neither mesh can resolve a deviation smaller than its own
-        # triangulation error, so never grade below that floor.
-        floor = max(tolerance_floor(ref.surface_mesh),
-                    tolerance_floor(actual.surface_mesh))
+        # Never grade below what the meshes can resolve — but derive that
+        # from the reference, scaled to the deflection the implementation was
+        # meshed at. Taking the implementation's own measured resolution
+        # would let a part with more detail than the reference, coarsened to
+        # fit the same budget, widen the tolerance it is judged by.
+        floor = tolerance_floor(
+            ref.surface_mesh, actual.surface_mesh.get("deflection")
+        )
         max_tol = max(hausdorff_tol_mm, floor)
         mean_tol = max(hausdorff_mean_tol_mm, floor / 4.0)
         max_status, _ = _status(h["hausdorff"], 0.0, max_tol, is_absolute=True)

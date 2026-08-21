@@ -246,6 +246,8 @@ def _run_analyze(args):
         # The mesh blob is tens of thousands of base64 characters; summarise
         # it rather than burying the fingerprint the user asked to see.
         print(_summarised_json(fp))
+        print("# surface mesh omitted above — use --json to write it",
+              file=sys.stderr)
 
 
 def _summarised_json(fp) -> str:
@@ -256,12 +258,10 @@ def _summarised_json(fp) -> str:
     data = asdict(fp)
     mesh = data.get("surface_mesh")
     if mesh and mesh.get("triangle_count"):
+        # Null rather than prose, plus a flag decode_mesh refuses: this is
+        # still valid JSON, so it must not load back as a plausible mesh.
         data["surface_mesh"] = dict(
-            mesh,
-            vertices=f"<{len(mesh['vertices'])} base64 chars, "
-                     f"--json to keep>",
-            triangles=f"<{len(mesh['triangles'])} base64 chars, "
-                      f"--json to keep>",
+            mesh, vertices=None, triangles=None, truncated=True,
         )
     return json.dumps(data, indent=2)
 

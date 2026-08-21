@@ -1015,9 +1015,27 @@ class TestStdoutSummary:
 
         summarised = json.loads(_summarised_json(fp))
         mesh = summarised["surface_mesh"]
-        assert "base64 chars" in mesh["vertices"]
+        assert mesh["vertices"] is None
+        assert mesh["truncated"] is True
         assert mesh["triangle_count"] == fp.surface_mesh["triangle_count"]
         assert len(_summarised_json(fp)) < len(fp.to_json()) / 2
+
+    def test_truncated_mesh_will_not_decode(self, tmp_path):
+        """It is valid JSON, so it must refuse to load rather than decode junk."""
+        import json
+        import pytest
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+        from cad_fingerprint.analyze import decoded_mesh
+        from cad_fingerprint.cli import _summarised_json
+
+        path = str(tmp_path / "dump3.step")
+        export_step(Sphere(radius=10), path)
+        fp = CadFingerprint.from_step(path)
+
+        reloaded = CadFingerprint(**json.loads(_summarised_json(fp)))
+        with pytest.raises(ValueError, match="truncated"):
+            decoded_mesh(reloaded.surface_mesh)
 
     def test_full_json_still_carries_the_mesh(self, tmp_path):
         import json
@@ -1054,9 +1072,75 @@ class TestCompareMeshBudget:
             max_mesh_triangles=800, no_hausdorff=False,
             stl_facet_error=None,
         )
+
+        from cad_fingerprint import fingerprint as fingerprint_module
+
+        budgets = []
+        original = fingerprint_module.CadFingerprint.from_step.__func__
+
+        def recording(cls, path, **kwargs):
+            budgets.append(kwargs.get("max_mesh_triangles"))
+            return original(cls, path, **kwargs)
+
+        fingerprint_module.CadFingerprint.from_step = classmethod(recording)
         try:
             _run_compare(args)
-        except SystemExit:
-            pass  # non-zero exit on a failing metric is expected
+        except SystemExit as exit_code:
+            assert exit_code.code == 1  # a failing metric, not a usage error
+        finally:
+            fingerprint_module.CadFingerprint.from_step = classmethod(original)
+
         out = capsys.readouterr().out
         assert "Surface Deviation" in out
+        assert len(budgets) == 2, "reference and implementation were analysed"
+        assert budgets[0] == 800                    # the reference's own budget
+        assert budgets[1] == 20000                  # max(ref_count * 4, 20000)
+        assert budgets[1] < 10 ** 9, "the implementation mesh must stay capped"
+
+
+class TestCompareToleranceIsNotSelfReferential:
+    """An implementation cannot widen the tolerance it is graded against."""
+
+    @staticmethod
+    def _pair(tmp_path):
+        from build123d import Sphere, export_step
+        from cad_fingerprint import CadFingerprint
+
+        ref_path = str(tmp_path / "sr_ref.step")
+        impl_path = str(tmp_path / "sr_impl.step")
+        export_step(Sphere(radius=10), ref_path)
+        export_step(Sphere(radius=10.3), impl_path)
+        return (CadFingerprint.from_step(ref_path),
+                CadFingerprint.from_step(impl_path))
+
+    def test_implementation_resolution_does_not_move_the_tolerance(self, tmp_path):
+        """Its own measured chord error must not enter the floor.
+
+        A part with more detail than the reference gets coarsened to fit the
+        same triangle budget, which inflates that figure — and would excuse
+        the very deviation being measured.
+        """
+        from cad_fingerprint.compare import compare_fingerprints
+
+        ref, impl = self._pair(tmp_path)
+        honest = compare_fingerprints(ref, impl, hausdorff_samples=400)
+
+        impl.surface_mesh = dict(impl.surface_mesh, resolution=50.0)
+        inflated = compare_fingerprints(ref, impl, hausdorff_samples=400)
+
+        assert inflated["hausdorff"]["tolerance"] == honest["hausdorff"]["tolerance"]
+        assert inflated["hausdorff"]["status"] == honest["hausdorff"]["status"]
+
+    def test_floor_still_follows_the_deflection_actually_used(self, tmp_path):
+        """Coarser meshing is a real loss of resolution, and must count."""
+        from cad_fingerprint.compare import compare_fingerprints
+
+        ref, impl = self._pair(tmp_path)
+        fine = compare_fingerprints(ref, impl, hausdorff_samples=400)
+
+        impl.surface_mesh = dict(
+            impl.surface_mesh, deflection=impl.surface_mesh["deflection"] * 20
+        )
+        coarse = compare_fingerprints(ref, impl, hausdorff_samples=400)
+        assert coarse["hausdorff"]["tolerance"] > fine["hausdorff"]["tolerance"]
+        assert coarse["hausdorff"]["resolution_limited"] is True

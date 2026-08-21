@@ -84,6 +84,11 @@ def encode_mesh(vertices: list, triangles: list) -> dict:
 
 def decode_mesh(payload: dict) -> tuple[list, list]:
     """Decode an :func:`encode_mesh` payload back into (vertices, triangles)."""
+    if payload and payload.get("truncated"):
+        raise ValueError(
+            "this fingerprint's surface mesh was truncated for display; "
+            "re-run the analysis with --json to write the full mesh"
+        )
     if not payload or not payload.get("vertex_count"):
         return [], []
     lo = payload["bbox_min"]
@@ -275,8 +280,17 @@ def mesh_resolution(surface_mesh: dict) -> float:
     )
 
 
-def tolerance_floor(surface_mesh: dict) -> float:
+def tolerance_floor(
+    surface_mesh: dict, candidate_deflection: float | None = None,
+) -> float:
     """Smallest deviation a mesh of this resolution can meaningfully resolve.
+
+    ``candidate_deflection`` is the deflection the part being compared was
+    actually meshed at, which may be coarser than the reference's if it had
+    more detail to fit into the same triangle budget. Chord error scales with
+    deflection, so the reference's own figures scale to cover it — reading
+    the error off the candidate instead would let the part being judged widen
+    its own tolerance.
 
     Twice the combined meshing error. For a STEP reference that error is
     measured rather than estimated, and across spheres, cylinders, cones and
@@ -285,7 +299,14 @@ def tolerance_floor(surface_mesh: dict) -> float:
     margin covers the STL path, where the error can only be estimated from
     the facets and can run about 1.4x under the truth.
     """
-    return 2.0 * mesh_resolution(surface_mesh)
+    reference = surface_mesh.get("resolution", 0.0)
+    candidate = surface_mesh.get(
+        "candidate_resolution", surface_mesh.get("deflection", 0.0)
+    )
+    recorded = surface_mesh.get("deflection", 0.0)
+    if candidate_deflection and recorded > 0:
+        candidate *= candidate_deflection / recorded
+    return 2.0 * (reference + candidate)
 
 
 # ── point ↔ triangle distance ────────────────────────────────────────

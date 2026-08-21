@@ -914,10 +914,11 @@ def _hausdorff_test_lines(
     from .hausdorff import mesh_resolution
 
     if raised:
+        cluster_cell = surface_mesh.get("cluster_cell", 0.0)
         clustered = (
             not surface_mesh.get("remeshed", True)
-            and surface_mesh.get("cluster_cell", 0.0)
-            >= surface_mesh.get("facet_error", 0.0)
+            and cluster_cell > 0.0
+            and cluster_cell >= surface_mesh.get("facet_error", 0.0)
         )
         if clustered:
             # The reference STL was thinned to fit the triangle budget, so a

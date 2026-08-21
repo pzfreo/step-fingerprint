@@ -88,10 +88,12 @@ the same mesh, and nothing in the file says which was meant — so the tool
 prints what it read, warns when it could not read anything, and
 `--stl-facet-error` lets you state the export tolerance outright.
 
-The floor is re-derived inside the generated test from the mesh the part under
-test actually produced, so an implementation that tessellates far more finely
-than the reference (and therefore gets coarsened to the same triangle ceiling)
-is judged against the resolution it was really measured at.
+An implementation with more detail than the reference hits the same triangle
+ceiling and gets meshed coarser, so the floor scales with the deflection its
+mesh ended up at. It scales the *reference's* measured error, never anything
+read off the part under test — otherwise a part could widen the tolerance it is
+judged by simply by carrying more detail. `compare` and the generated tests
+apply the same rule.
 
 For STL files, face type classification is unavailable (no analytical surface
 information exists in the mesh); all other measurements work normally. The
